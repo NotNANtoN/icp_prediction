@@ -1,0 +1,23 @@
+# @package _global_
+
+model_type: torch
+
+tuning_ranges:
+  # net and loss
+  n_layers: [2, 16]
+  hidden_size: [64, 256]
+  act_fnc: ["selu", "relu", "tanh", "lrelu"]
+  w_init: he  # ['he', 'xavier', 'snn']
+  bn: [0, 1]
+  dropout: [0.0, 0.5]
+  alpha_dropout: [0.1, 0.5]
+  # training
+  batch_size: [16, 128]
+  workers: 3
+  lr: [0.0001, 0.1]
+  augm_std: [0.005, 0.2]
+  optimizer: ['adam', 'sgd', 'adamw']
+  # ensemble
+  ensemble_k: [0, 3]
+  ensemble_prior: [0, 1]
+  ensemble_bootstrap: [0, 1]

@@ -1,0 +1,8 @@
+# @package _global_
+
+m: svc
+
+model_args:
+  C: 1.0  # regularization parameters
+  tol: 1e-3  # stop criterion tolerance
+  kernel: 'rbf'

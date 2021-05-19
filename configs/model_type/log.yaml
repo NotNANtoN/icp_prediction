@@ -1,0 +1,10 @@
+# @package _global_
+
+m: log
+
+model_args:
+  C: 1.0
+  penalty: 'elasticnet'
+  l1_ratio: 0.5
+  max_iter: 2000
+  solver: 'saga'

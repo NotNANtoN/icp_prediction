@@ -1,0 +1,30 @@
+# @package _global_
+
+m: torch
+
+model_args:
+  # debuggin
+  write_plots: 0  # whether to write plots to disk
+  # net and loss
+  use_softmax: 1
+  n_layers: 2
+  hidden_size: 128
+  act_fnc: relu  # ["selu", "relu", "tanh", "lrelu"]
+  w_init: he  # ['he', 'xavier', 'snn']
+  bn: 0
+  dropout: 0
+  alpha_dropout: 0
+  # training
+  batch_size: 32
+  workers: 3
+  lr: 0.0003
+  max_eps: 50
+  augm_std: 0.01
+  optimizer: adam  # ['adam', 'sgd', 'adamw']
+  # saliency
+  saliency_std: 0.01
+  saliency_n_samples: 50
+  # ensemble
+  ensemble_k: 0
+  ensemble_prior: 0
+  ensemble_bootstrap: 0

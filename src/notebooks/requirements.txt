@@ -1,0 +1,2 @@
+bokeh==2.0.2
+pandas_profiling==2.8.0

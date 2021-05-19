@@ -1,0 +1,15 @@
+# @package _global_
+
+model_type: tabnet
+
+tuning_ranges:
+  n_d: [2, 16]
+  n_a: [2, 16]
+  n_steps: [3, 10]
+  gamma: [1.0, 2.0]
+  n_independent: [1, 5]
+  n_shared: [1, 5]
+  momentum: [0.01, 0.4]
+  clip_value: [0, 1.0]
+  lambda_sparse: [0.00001, 0.01]
+  mask_type: ["sparsemax", "entmax"]

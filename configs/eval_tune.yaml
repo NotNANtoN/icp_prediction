@@ -1,0 +1,19 @@
+model: ???
+nf_outer: 10  # number of inner k-folds - number of tunings
+nf_inner: 5  # number of inner k-folds - number of trainings per hyperparameter set
+nt: 5000  # number of trials per tuning
+
+
+df:
+features:  # path to pkl file of pre-selected features
+dts: 'clinical'  # Which features to use for optimization. Separated by comma, in any order can be:'
+                           # blood, imaging, imaging_pca and clinical.'
+                           # Can also be: "opt", then this selection will be tuned for.
+imaging_pca_var: 0.8  # Explained variance used for PCA
+freeze_prepro: 0  # Set to 1 to use frozen params for preprocessing
+
+
+pp: 1  # parallel processes
+metric: prauc  # prauc, rocauc, acc
+pruner: median  # asha, median
+save_tune: 1  # must be true if pp is set

@@ -1,0 +1,12 @@
+# @package _global_
+
+model_type: mlp
+
+tuning_ranges:
+  layers: [2, 5]
+  nodes: [32, 128]
+  activation: ['tanh', 'relu']
+  solver: ['sgd', 'adam']
+  learning_rate: ['constant', 'invscaling', 'adaptive']
+  learning_rate_init: [0.00001, 0.001]
+  max_iter: [375, 750]
