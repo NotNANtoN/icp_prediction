@@ -9,7 +9,7 @@ drop_variables_list = ["Alter gruppiert", "Regierungsbezirk", "Landkreis"]
 
 
 to_float_variables = ["nf33a", "nf33b", "nf34a", "nf34b", "nf35a", "nf35b", "nf36a", "nf36b",
-                       "f41", "nf42", "f49", "nf76", "nf77", "nf82", "nf83", "nf84", "nf88", "nf92", "nf94", "nt1", "nt2", "f145", "altq"]
+                      "f41", "nf42", "f49", "nf76", "nf77", "nf82", "nf83", "nf84", "nf88", "nf92", "nf94", "nt1", "nt2", "f145", "altq"]
 
 
 ### Overview of different variable types ###
@@ -23,7 +23,7 @@ self_positive = ["f1b_1", "f1b_2", "f1b_3", "f1b_4", "f1b_5", "f1b_6"]
 family_positive = ["f4a_1", "f4a_2", "f4a_3", "f4a_4", "f4b_1", "f4b_2", "f4b_3", "f4b_4"]
 
 symptoms_bin = ["f3_1", "f3_2", "f3_3", "f3_4", "f3_5", "f3_6", "f3_7", "f3_8", "f3_9", "f3_10",
-             "f3_11", "f3_12", "f3_13", "f3_16", "f3_17", "f3_18", "f3_19", "f3_20", "f145"]
+                "f3_11", "f3_12", "f3_13", "f3_16", "f3_17", "f3_18", "f3_19", "f3_20", "f145"]
 
 pos_changes_bin = ['f8_1', 'f8_2', 'f8_3', 'f8_4', 'f8_5', 'f8_6', 'f8_7', 'f8_8', 'f8_9', 'f8_10', 'f8_11', 'f8_12', 'f8_13', 'f8_14', 'f8_15', 'f8_16', 'f8_17', 'f8_18', 'f8_19', 'f8_20', 'f8_21', 'f8_22']
 canceled_event_bin = ["f17"]
@@ -47,10 +47,10 @@ estimate_lethality = ["nf82", "nf83", "nf84"]
 
 # to be one-hot encoded
 
-to_one_hot = ["f2a", "f2b", "f38", "f39", "f40", "f43", "f45", "f46", "f47", 'f51', 'f52', 'f53',
-              'f54', 'f55', 'f56', 'f57', 'f58', 'f59', 'f61', 'f62', 'f69', 'f70', 'f73', 'f74',
+to_one_hot = ["f2a", "f2b", "f38", "f39", "f40", "f43", "f45", "f46", "f47", 'f50', 'f51', 'f52', 'f53',
+              'f54', 'f55', 'f56', 'f57', 'f58', 'f59', 'f60', 'f61', 'f62', 'f65_1', 'f65_2',
+              'f65_3', 'f65_4', 'f65_5', 'f66', 'f67', 'f69', 'f70', 'f73', 'f74',
               'f75', 'f85', 'f86', 'f87', 'expe', 'f90', 'f91', 'f93', 'f97', 'f136', 'f137', 'f138', 'f139', 'f140', 'f141', 'f142', 'f143', 'f144', 'ges', 'bl']
-state_support = ['f48_1', 'f48_2', 'f48_3', 'f48_4', 'f48_5', 'f48_6', 'f48_7', 'f48_8']
 expect_change = ['f65_1', 'f65_2', 'f65_3', 'f65_4', 'f65_5', 'f66', 'f67']
 reduced_income = ['f71_1', 'f71_2', 'f71_3', 'f71_4', 'f71_5', 'f71_6', 'f71_7', 'f71_8']
 
@@ -64,3 +64,7 @@ open_ended = ["f3_14", "f3_15"]  # as well as the ones with "open" in their name
 # at first
 age_kids = ['f78_1', 'f78_2', 'f78_3', 'f78_4', 'f78_5', 'f78_6', 'f79_1', 'f79_2', 'f79_3',
             'f79_4', 'f79_5', 'f79_6', 'f80_1', 'f80_2', 'f80_3', 'f80_4', 'f80_5', 'f80_6', 'f81_1', 'f81_2', 'f81_3', 'f81_4', 'f81_5', 'f81_6']
+
+not_always_applicable = ['f44_1', 'f44_2', 'f44_3', 'f44_4', 'f44_5', 'f44_6', 'f44_7', 'f44_8',
+                         'f48_1', 'f48_2', 'f48_3', 'f48_4', 'f48_5','f48_6','f48_7','f48_8']
+# a lot of missings there bc. they are conditional questions
