@@ -39,7 +39,7 @@ preconditions_when = ['f135a', 'f135b', 'f135c', 'f135d', 'f135e', 'f135f', 'f13
 
 # interval - 99 == nan
 interval_questions = ['nf33a', 'nf33b', 'nf34a', 'nf34b', 'nf35a', 'nf35b', 'nf36a', 'nf36b',
-                      'nf42', 'nf76', 'n77', 'nf88', 'nf92', 'nf94', 'nt1', 'nt2', "altq"]
+                      'nf42', 'nf76', 'nf77', 'nf88', 'nf92', 'nf94', 'nt1', 'nt2']
 estimate_lethality = ["nf82", "nf83", "nf84"]
 
 # to be one-hot encoded
