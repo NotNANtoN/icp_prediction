@@ -14,6 +14,9 @@ to_float_variables = ["nf33a", "nf33b", "nf34a", "nf34b", "nf35a", "nf35b", "nf3
 
 ### Overview of different variable types ###
 
+# variables with std below 0.02 - attention: naming here is after one-hot encoding
+low_variance = ['f3_8', 'f41', 'f49', 'f145', 'f2a_1', 'f38_5', 'f43_4', 'f45_1', 'f45_3', 'f45_7', 'f46_3', 'f54_6', 'f137_3', 'f138_3', 'f139_3', 'f140_3', 'f141_3', 'f143_3']
+
 # binary variables
 contact_positive = ["f1a_1", "f1a_2", "f1a_3", "f1a_4", "f1a_5", "f1a_6"]
 self_positive = ["f1b_1", "f1b_2", "f1b_3", "f1b_4", "f1b_5", "f1b_6"]
