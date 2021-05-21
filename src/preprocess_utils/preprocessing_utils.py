@@ -8,6 +8,8 @@ from scipy.stats import yeojohnson
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import MinMaxScaler
 
+import src.constants as constants
+
 """Utilities for pre-processing."""
 
 
@@ -86,7 +88,8 @@ def remove_univariate_outliers(df, quantile):
         "below_bound": 0
     }
 
-    df = df.transform(lambda col: col.groupby(df["Sex"]).transform(lambda x: _clip(x, count_dict, quantile)))
+    df = df.transform(lambda col: col.groupby(df[constants.gender]).transform(lambda x: _clip(x,
+                                                                                      count_dict, quantile)))
 
     print("Univariate outlier clipping:")
     print("Clipped", count_dict["above_bound"], " above the bounds and ", count_dict["below_bound"], "below the bounds")
@@ -94,19 +97,14 @@ def remove_univariate_outliers(df, quantile):
 
 
 def remove_multivariate_outliers(df: pd.DataFrame):
-    # Apply only on blood values
-    clinical_cols = (df.columns.str.contains("[^$POD$POCD$]") & ~(df.columns.str.contains("imaging")) & ~(
-        df.columns.str.contains("blood"))
-                     & ~df.columns.str.contains("_nan"))
-    # blood_cols = (df.columns.str.contains("[^$POD$POCD$]") & ~(df.columns.str.contains("imaging")) & ~(
-    #    df.columns.str.contains("clinical"))
-    #                 & ~df.columns.str.contains("_nan"))
-    # print("Removal cols: ", df.columns[clinical_cols])
+    label_col = constants.label_col
+    cols_for_outlier_removal = constants.cols_for_outlier_removal
+
     clf = IsolationForest(random_state=0, contamination=0.02, n_estimators=100)
-    out_inliers = clf.fit_predict(df.loc[:, clinical_cols])
+    out_inliers = clf.fit_predict(df.loc[:, cols_for_outlier_removal])
     outlier_mask = (out_inliers == -1)
-    # Only non-POD cases should be treated as outliers:
-    outlier_mask *= ~(df["POD"].astype(np.bool))
+    # Only non-target cases should be treated as outliers:
+    outlier_mask *= ~(df[label_col].astype(np.bool))
     # Get idcs:
     inlier_idcs = np.where(~outlier_mask)
     outlier_idcs = np.where(outlier_mask)
@@ -117,9 +115,10 @@ def remove_multivariate_outliers(df: pd.DataFrame):
     old_len = len(df)
     # df = df.drop(outlier_idcs)
     outliers = df.iloc[outlier_idcs]
-    print("Num outliers: ", len(df.iloc[outlier_idcs]), "Num POD in outliers: ", outliers["POD"].sum(),
-          "Fraction POD cases in outliers: ", outliers["POD"].mean())
-    print("Fraction POD cases in inliers: ", df.iloc[inlier_idcs]["POD"].mean())
+    print(f"Num outliers: {len(df.iloc[outlier_idcs])}"
+          f"\nNum {label_col} in outliers: {outliers[label_col].sum()}"
+          f"\nFraction {label_col} cases in outliers: {outliers[label_col].mean()}")
+    print(f"Fraction {label_col} cases in inliers: {df.iloc[inlier_idcs][label_col].mean()}")
     df = df.iloc[inlier_idcs]
     assert abs(len(df) - old_len) <= 50, f"Removed too many multivariate outliers: {abs(len(df) - old_len)}"
 
@@ -141,10 +140,7 @@ def normalize(df, method="minmax"):
         df_means = df.mean(axis=0)
         df_stds = df.std(axis=0)
         # Set mean of binaries to 0 and std to 1:
-        binaries = ["POD", "POCD"]
-        nan_features = [col for col in df.columns if col.endswith('_nan')]
-        binaries += nan_features
-        binary_idcs = [list(df.columns).index(name) for name in binaries]
+        binary_idcs = [i for i, c in enumerate(df.columns) if len(set(df[c].dropna())) == 2]
         df_means[binary_idcs] = 0
         df_stds[binary_idcs] = 1
 

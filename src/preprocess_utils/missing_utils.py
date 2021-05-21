@@ -1,20 +1,22 @@
 import sys
 
 from src.preprocess_utils.iterative_imputer import iterative_imputation
+import src.constants as constants
 
-
+label_col = constants.label_col
 # Handling of missings
 
 def drop_empty_target(df):
-    df = df[~(df["POD"].isna())]  # & df["POCD"].isna())]
-    assert df["POD"].isna().to_numpy().sum() == 0
+    df = df[~(df[label_col].isna())]  # & df[label_col_2].isna())]
+    assert df[label_col].isna().to_numpy().sum() == 0
     return df
 
 
 def _mean_imputation(df):
     df_means = df.mean(axis=0)
     df_mean_filled = df.copy()
-    df_mean_filled["PreCI_dichotomous_T0"].fillna(df["PreCI_dichotomous_T0"].mode()[0], inplace=True)
+    #df_mean_filled["PreCI_dichotomous_T0"].fillna(df["PreCI_dichotomous_T0"].mode()[0],
+    # inplace=True)
     df_mean_filled = df_mean_filled.fillna(df_means)
     return df_mean_filled
 
@@ -38,7 +40,7 @@ def _all_basic(df):
 
 def fill_missings(df, fill_method, estimator):
     print("Filling missing values...")
-    df_no_targets = df.drop(columns=["POD", "POCD"])
+    df_no_targets = df.drop(columns=label_col)
     print("Num cols in missing: ", len(df.columns))
     for col in df_no_targets.columns:
         if df_no_targets[col].isna().sum().sum() == len(df_no_targets[col]):
@@ -56,16 +58,16 @@ def fill_missings(df, fill_method, estimator):
     else:
         sys.exit("Aborting - Issues with --fill_method flag: Invalid argument.")
     assert len(df) == len(df_imputed)
-    assert len(df_imputed) == len(df['POD'])
+    assert len(df_imputed) == len(df[label_col])
     # TODO: why do I need to convert to list to not have NaNs appear in some cases???
-    df_imputed['POD'] = list(df['POD'])  # .astype(int)
-    df_imputed['POCD'] = list(df['POCD'].fillna(-1).astype(int))
+    df_imputed[label_col] = list(df[label_col])  # .astype(int)
+    #df_imputed[label_col_2] = list(df[label_col_2].fillna(-1).astype(int))
 
-    # print(len(df_imputed['POD']))
-    # print(len(df['POD']))
-    # print(list(df['POD']))
-    # print(list(df_imputed['POD']))
-    assert df_imputed['POD'].isna().to_numpy().sum() == 0
+    # print(len(df_imputed[label_col_1]))
+    # print(len(df[label_col_1]))
+    # print(list(df[label_col_1]))
+    # print(list(df_imputed[label_col_1]))
+    assert df_imputed[label_col].isna().to_numpy().sum() == 0
     assert df_imputed.isna().to_numpy().sum() == 0, df_imputed.isna().sum()
     print("Done filling values.")
     return df_imputed

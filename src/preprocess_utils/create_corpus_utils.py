@@ -6,6 +6,9 @@ import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.model_selection import train_test_split
 
+import src.constants as constants
+
+label_col = constants.label_col
 """
 Utilities for the actual corpus creation.
 """
@@ -17,8 +20,8 @@ def create_labels(df):
     # mean_age = df["Alter"].mean()
     return [  # (df_minuses.iloc[idx]["Alter"] < mean_age).astype(int).astype(str) +
         # df_minuses.iloc[idx]["sex"].astype(int).astype(str) +
-        df_minuses.iloc[idx]["POD"].astype(int).astype(str) +
-        df_minuses.iloc[idx]["POCD"].astype(int).astype(str)  # +
+        df_minuses.iloc[idx][label_col].astype(int).astype(str) +
+        #df_minuses.iloc[idx][label_col_2].astype(int).astype(str)  # +
         # df_minuses.iloc[idx]["PreCI_dichotomous_T0"].astype(int).astype(str)
         # PreCI_dichotomous_T0
         for idx in range(len(df))]

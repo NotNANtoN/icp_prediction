@@ -1,5 +1,8 @@
 import matplotlib.pyplot as plt
 
+import src.constants as constants
+
+label_col = constants.label_col
 
 def make_plots(df, prefix):
     ncols = 4
@@ -10,11 +13,11 @@ def make_plots(df, prefix):
     fig, axs = plt.subplots(nrows=nrows, ncols=ncols, squeeze=True, figsize=(10, 25))
     axs = axs.reshape(-1)
     for idx, name in enumerate(df.columns):
-        pod = df.loc[df['POD'] == 1, name]
-        no_pod = df.loc[df['POD'] == 0, name]
+        pod = df.loc[df[label_col] == 1, name]
+        no_pod = df.loc[df[label_col] == 0, name]
         ax = axs[idx]
-        ax.hist(pod, bins=bins, label="POD", density=True)
-        ax.hist(no_pod, bins=bins, label="No-POD", density=True, alpha=0.7)
+        ax.hist(pod, bins=bins, label=label_col, density=True)
+        ax.hist(no_pod, bins=bins, label=f"No {label_col}", density=True, alpha=0.7)
         ax.legend()
         ax.set_title(name)
     plt.legend()
