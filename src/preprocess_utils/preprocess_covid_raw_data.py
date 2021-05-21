@@ -49,10 +49,12 @@ def _create_compound_label(df, columns):
 def _one_hot(df, columns):
     for c in columns:
         if c not in df.columns:
-            print(f"{c} not in columns")
+            # print(f"{c} not in columns")
             break
         dummies = pd.get_dummies(df[c])
-        dummies.columns = [f"{c}_{int(val)}" for val in sorted(dummies.columns)]
+        dummies.columns = [
+            f"{c}_{int(val)}_nan" if i == len(dummies.columns) - 1 else f"{c}_{int(val)}" for i, val
+            in enumerate(sorted(dummies.columns))]
         # also if nan, set last dummy to 1 (= "weiß nicht/ kA")
         if df[c].isna().sum() > 0:
             dummies.loc[df[c].isna(), dummies.columns[-1]] = 1.0
@@ -127,6 +129,18 @@ def _handle_low_std_variables(df, delete, threshold=0.01):
     return df
 
 
+def _create_missing_feat_list(df):
+    nans = df.isna()  # .drop(columns=["subject"])
+    for col in nans.columns:
+        if nans[col].sum() == 0:
+            nans = nans.drop(columns=[col])
+    nans = nans.add_suffix("_nan").astype(float)
+    df = pd.concat([df, nans], axis=1)
+    # Go through full list again bc. some features where declared as nan-features beforehand
+    missing_feat_names = [c for c in df.columns if "_nan" in c]
+    return df, missing_feat_names
+
+
 def get_and_store_all_data(data_dir, lists_path):
     variable_names_path = os.path.join(data_dir, "Variablenwerte.xls")
     data_path = os.path.join(data_dir, "f20.0251z_290620.sav")
@@ -150,13 +164,13 @@ def get_and_store_all_data(data_dir, lists_path):
     df = _handle_low_std_variables(df, delete=False, threshold=0.02)
     df = df.drop(constants.drop_variables_list, axis=1)
     df = df.apply(lambda c: c.astype(float))
-
+    df, missingness_features = _create_missing_feat_list(df)
     # save names of input features
     input_features = [c for c in df.columns if c != constants.label_col]
     input_name_list_dir = os.path.join(lists_path, "feature_lists")
     os.makedirs(input_name_list_dir, exist_ok=True)
-    np.save(os.path.join(input_name_list_dir, "input_features"), input_features)
-
+    for name, l in zip(["input_features", "missing_feat_names"], [input_features, missingness_features]):
+        np.save(os.path.join(input_name_list_dir, name), l)
     return df
 
 
