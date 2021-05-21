@@ -1,7 +1,0 @@
-time
-@5thVentricle
-LeftWMhypointensities
-RightWMhypointensities
-nonWMhypointensities
-LeftnonWMhypointensities
-RightnonWMhypointensities

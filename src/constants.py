@@ -2,11 +2,13 @@
 
 label_col = "target"
 
-gender = "ges"
+gender = ['ges_1', 'ges_2', 'ges_3', 'ges_4']
 
-drop_variables_list = ["Alter gruppiert", "Regierungsbezirk", "Landkreis", 'f1a_3', 'f1a_4',
+drop_variables_list = ["altqx", "regbez", "lkrs", 'f1a_3', 'f1a_4',
                        'f1a_5', 'f1a_6', 'f1b_3', 'f1b_4', 'f1b_5', 'f1b_6', 'f2a_3', 'f2a_4',
-                       'f2a_5', 'f2b_3', 'f2b_4', 'f2b_5']
+                       'f2a_5', 'f2b_3', 'f2b_4', 'f2b_5'] + ['f1a_2', 'f1b_2', 'f2a_2', 'f2b_2']
+                                                            # diagnosed
+
 cols_for_outlier_removal = []
 
 # contact or myself (tested or diagnosed) at any time (2 weeks ago or earlier) # after one-hot
@@ -53,10 +55,12 @@ interval_questions = ['nf33a', 'nf33b', 'nf34a', 'nf34b', 'nf35a', 'nf35b', 'nf3
 
 # to be one-hot encoded
 
-to_one_hot = ["f2a", "f2b", "f38", "f39", "f40", "f43", "f45", "f46", "f47", 'f50', 'f51', 'f52', 'f53',
+to_one_hot = ["f2a", "f2b", "f38", "f39", "f40", "f43", 'f44_1', 'f44_2', 'f44_3', 'f44_4',
+              'f44_5', 'f44_6', 'f44_7', 'f44_8', "f45", "f46", "f47", 'f50', 'f51', 'f52', 'f53',
               'f54', 'f55', 'f56', 'f57', 'f58', 'f59', 'f60', 'f61', 'f62', 'f65_1', 'f65_2',
-              'f65_3', 'f65_4', 'f65_5', 'f66', 'f67', 'f69', 'f70', 'f73', 'f74',
-              'f75', 'f85', 'f86', 'f87', 'expe', 'f90', 'f91', 'f93', 'f97', 'f136', 'f137', 'f138', 'f139', 'f140', 'f141', 'f142', 'f143', 'f144', 'ges', 'bl']
+              'f65_3', 'f65_4', 'f65_5', 'f66', 'f67', 'f69', 'f70', 'f73', 'f74', 'f75', 'f85',
+              'f86', 'f87', 'expe', 'f90', 'f91', 'f93', 'f97', 'f136', 'f137', 'f138', 'f139',
+              'f140', 'f141', 'f142', 'f143', 'f144', 'ges', 'bl']
 expect_change = ['f65_1', 'f65_2', 'f65_3', 'f65_4', 'f65_5', 'f66', 'f67']
 reduced_income = ['f71_1', 'f71_2', 'f71_3', 'f71_4', 'f71_5', 'f71_6', 'f71_7', 'f71_8']
 

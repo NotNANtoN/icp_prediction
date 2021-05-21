@@ -13,7 +13,7 @@ from src.preprocess_utils.preprocessing_utils import apply_yeojohnson, remove_un
     remove_multivariate_outliers, normalize
 from src.preprocess_utils.missing_utils import fill_missings
 from src.preprocess_utils.argparser import create_argparser, check_exp_id
-from src.preprocess_utils.combine_datasets import get_and_store_all_data
+from src.preprocess_utils.preprocess_covid_raw_data import get_and_store_all_data
 from src.utils.args import read_args
 
 """
@@ -138,7 +138,7 @@ def setup_and_start_preprocessing(passed_args=None):
     data_path = "data"
 
     # Get dataset
-    df_raw = get_and_store_all_data(data_path, join("src", "preprocess_utils"), remove_precipitals=args.remove_precipitals)
+    df_raw = get_and_store_all_data(data_path, join("src", "preprocess_utils"))
     df, dev_idcs, test_idcs = _prep_data_get_devset(df_raw, data_path)
 
     # Start pre-processing

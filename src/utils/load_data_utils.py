@@ -11,7 +11,7 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 def read_pod_data(name, v=1, blood=0, static=1, clinical=1, imaging=0, imaging_pca=0, miss_feats=1,
                   imaging_pca_var=0.8, sparse_img=0,
                   features=None):
-    if os.getcwd()[-12:] == "/pharmaimage":
+    if "pi_corona" in os.getcwd():
         base_path = "data/"
     elif "src" in os.getcwd():
         base_path = "../data/"

@@ -19,8 +19,12 @@ def apply_yeojohnson(df):
     # - remove categorical features from list
     no_yeo_categorical = _get_categorical_cols(df)
     # - remove features that were before shown to map to one single value after yeo
-    no_yeo_bad_transform = np.load(os.path.join('src', 'preprocess_utils', 'feature_lists', 'ignorelist_yeo.npy'))
-    apply_yeo = list(set(col_names) - set(no_yeo_categorical) - set(no_yeo_bad_transform))
+    ignore_list_path = os.path.join('src', 'preprocess_utils', 'feature_lists', 'ignorelist_yeo.npy')
+    if os.path.isfile(ignore_list_path):
+        no_yeo_bad_transform = np.load(ignore_list_path)
+        apply_yeo = list(set(col_names) - set(no_yeo_categorical) - set(no_yeo_bad_transform))
+    else:
+        apply_yeo = list(set(col_names) - set(no_yeo_categorical))
 
     count = 0
     for col_name in apply_yeo:
@@ -62,13 +66,7 @@ def _yeo_integrity_okay(transformed_series, col_name):
 
 
 def _get_categorical_cols(df):
-    cat_cols = []
-
-    for col in df.columns:
-        # check if the column has less than 5 different values
-        if len(df[col].unique()) < 5:
-            cat_cols.append(col)
-
+    cat_cols = df.select_dtypes(include=['category']).columns
     return cat_cols
 
 
@@ -88,7 +86,12 @@ def remove_univariate_outliers(df, quantile):
         "below_bound": 0
     }
 
-    df = df.transform(lambda col: col.groupby(df[constants.gender]).transform(lambda x: _clip(x,
+    if isinstance(constants.gender, list):
+        # make sure that the first 2 values are m, f
+        df = df.transform(lambda col: col.groupby(df[constants.gender[0]]).transform(lambda x:
+                                                                                   _clip(x, count_dict, quantile)))
+    else:
+        df = df.transform(lambda col: col.groupby(df[constants.gender]).transform(lambda x: _clip(x,
                                                                                       count_dict, quantile)))
 
     print("Univariate outlier clipping:")

@@ -16,15 +16,8 @@ Utilities for the actual corpus creation.
 
 def create_labels(df):
     df_minuses = df.fillna(-1)
-    # df_minuses.loc[df["PreCI_dichotomous_T0"] == -1, "PreCI_dichotomous_T0"] = 0
-    # mean_age = df["Alter"].mean()
-    return [  # (df_minuses.iloc[idx]["Alter"] < mean_age).astype(int).astype(str) +
-        # df_minuses.iloc[idx]["sex"].astype(int).astype(str) +
-        df_minuses.iloc[idx][label_col].astype(int).astype(str) +
-        #df_minuses.iloc[idx][label_col_2].astype(int).astype(str)  # +
-        # df_minuses.iloc[idx]["PreCI_dichotomous_T0"].astype(int).astype(str)
-        # PreCI_dichotomous_T0
-        for idx in range(len(df))]
+    return [df_minuses.iloc[idx][label_col].astype(int).astype(str) for idx in range(len(df))]
+
 
 
 def create_balanced_split(df, dev_fraction=0.8, hard_threshold=0.3, soft_threshold=0.2,
@@ -117,6 +110,6 @@ def store_df(df, path):
 
     pd.to_pickle(df, os.path.join(path, "df.pkl"))
 
-    name_list_dir = os.path.join("src", "preprocess_utils", "feature_lists", "name_lists")
+    name_list_dir = os.path.join("src", "preprocess_utils", "feature_lists")
     for name_list in os.listdir(name_list_dir):
         shutil.copy(os.path.join(name_list_dir, name_list), os.path.join(path, name_list))

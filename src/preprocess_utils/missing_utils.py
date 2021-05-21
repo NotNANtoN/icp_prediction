@@ -60,13 +60,9 @@ def fill_missings(df, fill_method, estimator):
     assert len(df) == len(df_imputed)
     assert len(df_imputed) == len(df[label_col])
     # TODO: why do I need to convert to list to not have NaNs appear in some cases???
-    df_imputed[label_col] = list(df[label_col])  # .astype(int)
-    #df_imputed[label_col_2] = list(df[label_col_2].fillna(-1).astype(int))
+    df_imputed[label_col] = list(df[label_col])
 
-    # print(len(df_imputed[label_col_1]))
-    # print(len(df[label_col_1]))
-    # print(list(df[label_col_1]))
-    # print(list(df_imputed[label_col_1]))
+
     assert df_imputed[label_col].isna().to_numpy().sum() == 0
     assert df_imputed.isna().to_numpy().sum() == 0, df_imputed.isna().sum()
     print("Done filling values.")
