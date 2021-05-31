@@ -239,6 +239,7 @@ def load_data(df_name, split, nf, v=1, dev_idcs=None, test_idcs=None, train_idcs
     # Get number of features (for neural network creation) and class weights (for weighting the losses):
     class_weights = torch.mean(torch.stack([_calc_class_weights(y_train[i]) for i in range(len(y_train))]), dim=0)
 
+    assert constants.label_col not in feature_names
     if v:
         print('Num input features:\n  ', n_features)
 

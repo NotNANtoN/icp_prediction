@@ -54,6 +54,7 @@ def _one_hot(df, columns):
             # print(f"{c} not in columns")
             break
         dummies = pd.get_dummies(df[c])
+        # last dummy category is "don't know" -> mark with "_nan"
         dummies.columns = [
             f"{c}_{int(val)}_nan" if i == len(dummies.columns) - 1 else f"{c}_{int(val)}" for i, val
             in enumerate(sorted(dummies.columns))]
@@ -65,7 +66,7 @@ def _one_hot(df, columns):
     return df
 
 
-def _convert_categorical_to_int(df):
+def _convert_categorical_to_float(df):
     columns = df.select_dtypes(include=['category']).columns
     for c in columns:
         df[c] = df[c].astype(float)
@@ -149,24 +150,38 @@ def get_and_store_all_data(data_dir, lists_path):
 
     text_to_val_df = _load_variable_values_df(variable_names_path)
     df = _load_data(data_path, text_to_val_df)
+    # set "don't know" responses to mean where plausible
     df = _dontknow_to_mean(df, constants.ordinal_questions)
+    # set "don't know" responses to lowest value where plausible
     df = _dontknow_to_lowest(df, constants.preconditions_when)
+    # replace the nan-placeholders by np.nan
     df = _replace_nan_placeholder(df, text_to_val_df, constants.interval_questions)
-    df = _convert_categorical_to_int(df)
+    # convert all the categoricals to float
+    df = _convert_categorical_to_float(df)
+    # some values are 1 or missing -> set missing to 0
     df = _single_val_to_bin(df)
 
+    # one-hot encode selected variables
     for l in [constants.to_one_hot, constants.expect_change, constants.reduced_income,
               constants.age_kids, constants.not_always_applicable]:
         df = _one_hot(df, l)
 
+    # drop some variables or ordinal categories (like some response options of the target questions)
     df = df.drop(constants.drop_variables_list, axis=1)
+
+    # only the numeric/interval variables should have nans now bc. for every other question
+    # they're encoded
     assert _check_only_nvars_have_nan(df)
 
+    # remove variables with especially low standard deviation
     df = _handle_low_std_variables(df, delete=False, threshold=0.02)
+    # set non_categorical variables to float
     df[constants.non_categorical] = df[constants.non_categorical].apply(lambda c: c.astype(float))
+    # store all nan-features (includes "don't know")
     df, missingness_features = _create_missing_feat_list(df)
+    # create label based on aggregate of constants.compound_label_cols_only_tested
     df = _create_compound_label(df, constants.compound_label_cols_only_tested)
-    # save names of input features
+    # save names of input features & missingness features
     input_features = [c for c in df.columns if c != constants.label_col and c not in constants.compound_label_cols_incl_diagnosed]
     input_name_list_dir = os.path.join(lists_path, "feature_lists")
     os.makedirs(input_name_list_dir, exist_ok=True)
