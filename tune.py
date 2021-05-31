@@ -41,6 +41,7 @@ def main(cfg):
     os.chdir(hydra.utils.get_original_cwd())
     # get train_args
     train_cfg = get_train_args_tune(cfg)
+    print(cfg)
     value, best_params, best_trial, best_train_args = run_optimization(train_args=train_cfg, **cfg)
     print("value: ", value, "best params: ", best_params)
     return True

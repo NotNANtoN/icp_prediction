@@ -20,10 +20,9 @@ class Objective:
     Runs trials for a specified classifier model with different hyperparameter suggestions.
     """
 
-    def __init__(self, skf_idcs, train_kwargs, tuning_ranges, df, dts, m, features, freeze_prepro, cache_dir, metric,
+    def __init__(self, skf_idcs, train_kwargs, tuning_ranges, df, m, features, freeze_prepro, cache_dir, metric,
                  pp):
         self.opt_over_dataset = df == "opt"
-        self.opt_over_features = dts == "opt"
         self.use_preselected_features = features
         self.classifier_name = m  # ['torch', 'rf', 'xgb', 'svc', 'mlp', 'log']
         self.train_kwargs = train_kwargs
@@ -194,11 +193,14 @@ class Objective:
         # Dataset options:
         # Preprocess options:
         if self.freeze_prepro:
-            yeo = 1
-            fill_method = 'median'
-            norm_method = 'z'
-            remove_outliers = 0.9999
-            remove_multi_outliers = 0
+            # yeo_N/normalization_None/median/uni_clip_0.9999/multi_clip_N
+            args_from_path = self.chosen_df.split('/')
+            yeo = int(args_from_path[0].endswith('Y'))
+            norm_method = args_from_path[1].split('_')[-1]
+            norm_method = norm_method if norm_method != 'None' else None
+            fill_method = args_from_path[2]
+            remove_outliers = args_from_path[3].split('_')[-1]
+            remove_multi_outliers = int(args_from_path[4].endswith('Y'))
             miss_feats = 0
         elif self.opt_over_dataset:
             yeo = trial.suggest_int('yeo', *self.tuning_ranges['yeo'])

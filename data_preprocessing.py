@@ -10,11 +10,13 @@ sys.path.insert(0, '')
 from src.preprocess_utils.create_corpus_utils import store_df, create_devtest_splits_and_save, \
     create_trainval_splits_and_save
 from src.preprocess_utils.preprocessing_utils import apply_yeojohnson, remove_univariate_outliers, \
-    remove_multivariate_outliers, normalize
+    remove_multivariate_outliers, normalize, create_missing_feat_list
 from src.preprocess_utils.missing_utils import fill_missings
 from src.preprocess_utils.argparser import create_argparser, check_exp_id
 from src.preprocess_utils.preprocess_covid_raw_data import get_and_store_all_data
 from src.utils.args import read_args
+import src.constants as constants
+
 
 """
 This script performs all pre-processing steps and allows for selection of applied procedures.
@@ -24,7 +26,7 @@ This script performs all pre-processing steps and allows for selection of applie
 def out_dir_name(yeo, norm_method, fill_method, remove_outliers, remove_multi_outliers):
     """Determine name of output directory with respect to the performed procedures."""
     name = "yeo_" + ("Y" if yeo else "N")
-    name = join(name, norm_method)
+    name = join(name, "normalization_" + (norm_method if norm_method else "None"))
     name = join(name, fill_method)
     name = join(name, "uni_clip_" + (str(remove_outliers) if remove_outliers else "N"))
     name = join(name, "multi_clip_" + ("Y" if remove_multi_outliers else "N"))
@@ -97,7 +99,8 @@ def preprocess(df, outpath, dev_idcs, test_idcs, args):
     assert len(no_var_cols.columns) == 0, no_var_cols.columns
 
     # Normalization:
-    df = normalize(df, method=args.norm_method)
+    if args.norm_method is not None:  # Decision tree based methods don't require scaling
+        df = normalize(df, method=args.norm_method)
 
     # Fill NaNs:
     df = fill_missings(df, args.fill_method, args.estimator)
@@ -108,6 +111,14 @@ def preprocess(df, outpath, dev_idcs, test_idcs, args):
     # Store full dataset w/o split/k-fold (multi-out removed here if applicable)
     if args.save:
         store_df(df, path)
+        # store all nan-features (includes "don't know")
+        df, missingness_features = create_missing_feat_list(df)
+        # save names of input features & missingness features
+        input_features = [c for c in df.columns if
+                          c != constants.label_col and c not in constants.compound_label_cols_incl_diagnosed]
+        for name, l in zip(["input_features", "missing_feat_names"],
+                           [input_features, missingness_features]):
+            np.save(os.path.join(path, name), l)
 
     # Continue only with dev split
     if new_dev_idcs is not None:
@@ -121,7 +132,6 @@ def preprocess(df, outpath, dev_idcs, test_idcs, args):
     print("Train and val splits:")
     if args.save:
         create_trainval_splits_and_save(dev_df, path)
-        
     print("Total size: ", df.shape)
     print("Dev size: ", dev_df.shape)
     print("\n\n ... finished pre-processing")
@@ -158,10 +168,12 @@ def setup_and_start_preprocessing(passed_args=None):
     else:
         print("Starting pre-processing with the following settings: \n\t{}{}{}{}{}\n"
               .format(("- Yeo Johnson\n\t" if args.yeo else ""),
-                      "- Normalization/Standardization with " + args.norm_method + "\n\t",
-                      "- Fill missings through {}{}\n\t".format(args.fill_method,
+                      (f"- Normalization/Standardization with {args.norm_method}\n\t" if
+                      args.norm_method else ""),
+                      ("- Fill missings through {}{}\n\t".format(args.fill_method,
                                                                 (f" with {args.estimator} estimator"
-                                                                 if args.fill_method == 'iterative' else "")),
+                                                                 if args.fill_method ==
+                                                                    'iterative' else ""))),
                       (f"- Remove outliers with {args.remove_outliers} quantile\n\t" if args.remove_outliers else ""),
                       ("- Apply IsolationForest for multivariate outlier removal\n" if args.remove_multi_outliers
                        else "")))

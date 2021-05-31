@@ -10,7 +10,7 @@ def create_argparser():
                         help='Enter quantile for which to remove outliers (e.g. `0.9999`). If flag is not used, '
                              'no outlier removal will be performed. Default: None.')
 
-    parser.add_argument('--norm_method', type=str, default='z', choices=['minmax', 'z'],
+    parser.add_argument('--norm_method', type=str, default=None, choices=['minmax', 'z', None],
                         help='Normalization method. Default: minmax.')
 
     parser.add_argument('--fill_method', type=str, default='median',
@@ -26,7 +26,7 @@ def create_argparser():
     parser.add_argument('--estimator', type=str, default='bayesridge', choices=['knn', 'trees', 'bayesridge'],
                         help='Estimator for IterativeImputer. `trees` = ExtraTreesRegressor. Default: bayesridge.')
 
-    parser.add_argument('--yeo', default=1, type=int,
+    parser.add_argument('--yeo', default=0, type=int,
                         help='To apply Yeo Johnson transform just use the --yeo flag (no param). Default: False.')
 
     parser.add_argument('--remove_multi_outliers', default=0, type=int,
@@ -49,25 +49,25 @@ def create_argparser():
 
 def check_exp_id(args):
     if args.exp_id == 1:
-        args.yeo = True
+        #args.yeo = True
         args.remove_outliers = 0.9999
         args.norm_method = 'z'
         args.fill_method = 'iterative'
 
     elif args.exp_id == 2:
-        args.yeo = False
+        #args.yeo = False
         args.remove_outliers = 0.9999
         args.norm_method = 'minmax'
         args.fill_method = 'iterative'
 
     elif args.exp_id == 3:
-        args.yeo = True
+        #args.yeo = True
         args.remove_outliers = 0.9999
         args.norm_method = 'z'
         args.fill_method = 'median'
 
     elif args.exp_id == 4:
-        args.yeo = True
+        #args.yeo = True
         args.norm_method = 'z'
         args.fill_method = 'iterative'
 

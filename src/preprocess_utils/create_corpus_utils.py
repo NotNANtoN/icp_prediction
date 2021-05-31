@@ -110,6 +110,6 @@ def store_df(df, path):
 
     pd.to_pickle(df, os.path.join(path, "df.pkl"))
 
-    name_list_dir = os.path.join("src", "preprocess_utils", "feature_lists")
-    for name_list in os.listdir(name_list_dir):
-        shutil.copy(os.path.join(name_list_dir, name_list), os.path.join(path, name_list))
+    #name_list_dir = os.path.join("src", "preprocess_utils", "feature_lists")
+    #for name_list in os.listdir(name_list_dir):
+     #   shutil.copy(os.path.join(name_list_dir, name_list), os.path.join(path, name_list))

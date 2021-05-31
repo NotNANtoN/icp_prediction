@@ -146,7 +146,7 @@ def normalize(df, method="minmax"):
         binary_idcs = [i for i, c in enumerate(df.columns) if len(set(df[c].dropna())) == 2]
         df_means[binary_idcs] = 0
         df_stds[binary_idcs] = 1
-
+        # Should we mask out ordinal scale data?
         std_zero_mask = df_stds == 0
         print("STD of zero: ", std_zero_mask.sum())
         df_stds[std_zero_mask] = 1
@@ -176,3 +176,14 @@ def set_nans(df):
     df = df.replace('NaN', math.nan)
     df = df.replace(' ', math.nan)
     return df
+
+def create_missing_feat_list(df):
+    nans = df.isna()  # .drop(columns=["subject"])
+    for col in nans.columns:
+        if nans[col].sum() == 0:
+            nans = nans.drop(columns=[col])
+    nans = nans.add_suffix("_nan")
+    df = pd.concat([df, nans], axis=1)
+    # Go through full list again bc. some features where declared as nan-features beforehand
+    missing_feat_names = [c for c in df.columns if "_nan" in c]
+    return df, missing_feat_names

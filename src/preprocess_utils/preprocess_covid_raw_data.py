@@ -20,10 +20,13 @@ def _dontknow_to_lowest(df, columns):
     return df
 
 
-def _replace_nan_placeholder(df, text_to_val_df, columns):
+def _replace_nan_placeholder(df, text_to_val_df, columns, minus_one=False):
     # Replace 99, 999 etc. by np.nan
     for c in columns:
-        nan_placeholder = text_to_val_df.loc[text_to_val_df['Name'] == c, 'Value'].to_list()[0]
+        if not minus_one:
+            nan_placeholder = text_to_val_df.loc[text_to_val_df['Name'] == c, 'Value'].to_list()[0]
+        else:
+            nan_placeholder = -1.0
         if c in df.columns:
             df[c] = df[c].replace(nan_placeholder, np.nan)
     return df
@@ -132,18 +135,6 @@ def _handle_low_std_variables(df, delete, threshold=0.01):
     return df
 
 
-def _create_missing_feat_list(df):
-    nans = df.isna()  # .drop(columns=["subject"])
-    for col in nans.columns:
-        if nans[col].sum() == 0:
-            nans = nans.drop(columns=[col])
-    nans = nans.add_suffix("_nan")
-    df = pd.concat([df, nans], axis=1)
-    # Go through full list again bc. some features where declared as nan-features beforehand
-    missing_feat_names = [c for c in df.columns if "_nan" in c]
-    return df, missing_feat_names
-
-
 def get_and_store_all_data(data_dir, lists_path):
     variable_names_path = os.path.join(data_dir, "Variablenwerte.xls")
     data_path = os.path.join(data_dir, "f20.0251z_290620.sav")
@@ -154,8 +145,9 @@ def get_and_store_all_data(data_dir, lists_path):
     df = _dontknow_to_mean(df, constants.ordinal_questions)
     # set "don't know" responses to lowest value where plausible
     df = _dontknow_to_lowest(df, constants.preconditions_when)
-    # replace the nan-placeholders by np.nan
+    # replace the nan-placeholders by np.nan (can be 99, 999, 9999, 99999, -1 - to my knowledge)
     df = _replace_nan_placeholder(df, text_to_val_df, constants.interval_questions)
+    df = _replace_nan_placeholder(df, text_to_val_df, constants.minus_nan, minus_one=True)
     # convert all the categoricals to float
     df = _convert_categorical_to_float(df)
     # some values are 1 or missing -> set missing to 0
@@ -177,16 +169,8 @@ def get_and_store_all_data(data_dir, lists_path):
     df = _handle_low_std_variables(df, delete=False, threshold=0.02)
     # set non_categorical variables to float
     df[constants.non_categorical] = df[constants.non_categorical].apply(lambda c: c.astype(float))
-    # store all nan-features (includes "don't know")
-    df, missingness_features = _create_missing_feat_list(df)
     # create label based on aggregate of constants.compound_label_cols_only_tested
     df = _create_compound_label(df, constants.compound_label_cols_only_tested)
-    # save names of input features & missingness features
-    input_features = [c for c in df.columns if c != constants.label_col and c not in constants.compound_label_cols_incl_diagnosed]
-    input_name_list_dir = os.path.join(lists_path, "feature_lists")
-    os.makedirs(input_name_list_dir, exist_ok=True)
-    for name, l in zip(["input_features", "missing_feat_names"], [input_features, missingness_features]):
-        np.save(os.path.join(input_name_list_dir, name), l)
     return df
 
 

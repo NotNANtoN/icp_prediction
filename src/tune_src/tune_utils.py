@@ -29,11 +29,11 @@ def _load_study(study_name, root_path):
     return study
 
 
-def _get_path(eval_path, load_path, model_name, metric, nf, pruner, dts, nt):
+def _get_path(eval_path, load_path, model_name, metric, nf, pruner, nt):
     load_name = eval_path if eval_path is not None else load_path
     if load_name is None:
         timestamp = timestring()
-        subfolder = f'{timestamp}_{model_name}_{metric}_{nf}_{dts}_{nt}' \
+        subfolder = f'{timestamp}_{model_name}_{metric}_{nf}_{nt}' \
                     f'{f"_{pruner}" if model_name == "torch" else ""}'
     else:
         subfolder = load_name
@@ -98,23 +98,17 @@ def _store_study(study, plot_dict, root_dir, subfolder, eval_path, cache_dir):
         plot.write_image(os.path.join(path, plot_name + ".pdf"))
 
 
-def create_dts_dict(dts, imaging_pca_var, features):
+def create_dts_dict(features):
     dts_dict = {}
     if features:
         dts_dict['features'] = features
-    else:
-        dts_dict['blood'] = 'blood' in dts
-        dts_dict['sparse_img'] = 'sparse_img' in dts
-        dts_dict['imaging'] = 'imaging' in dts and 'imaging_pca' not in dts
-        dts_dict['imaging_pca'] = 'imaging_pca' in dts
-        dts_dict['clinical'] = 'clinical' in dts
-        dts_dict['imaging_pca_var'] = imaging_pca_var
+
     return dts_dict
 
 
-def _create_study(train_kwargs, root_dir, subfolder_name, eval_path, load_path, metric, pruner_name, save_tune,
-                  tuning_ranges, df, dts, imaging_pca_var, m, features, freeze_prepro, dev_idcs, inner_splits, y_dev, pp
-                  ):
+def _create_study(train_kwargs, root_dir, subfolder_name, eval_path, load_path, metric, pruner_name,
+                  save_tune, tuning_ranges, df, m, features, freeze_prepro, dev_idcs, inner_splits,
+                  y_dev, pp):
 
 
     # Set cache directory
@@ -124,7 +118,7 @@ def _create_study(train_kwargs, root_dir, subfolder_name, eval_path, load_path, 
     load_name = _get_loading_path(eval_path, load_path)
     if load_name is not None:
         loaded_args = joblib.load(os.path.join(root_dir, load_name, 'args.pkl'))
-        subfolder_name, metric, pruner_name, skf_idcs, train_kwargs, tuning_ranges, df, dts, m, features, \
+        subfolder_name, metric, pruner_name, skf_idcs, train_kwargs, tuning_ranges, df, m, features, \
         freeze_prepro, cache_dir, metric = loaded_args
     # Create sampler
     sampler = optuna.samplers.TPESampler()
@@ -134,7 +128,7 @@ def _create_study(train_kwargs, root_dir, subfolder_name, eval_path, load_path, 
     storage = optuna.storages.RDBStorage(url="sqlite:///optuna.db",
                                          engine_kwargs={"connect_args": {"timeout": 30}})
     # Set data types:
-    data_type_kwargs = create_dts_dict(dts, imaging_pca_var, features)
+    data_type_kwargs = create_dts_dict(features)
 
     # Set train_args:
     train_kwargs.update(data_type_kwargs)
@@ -150,7 +144,7 @@ def _create_study(train_kwargs, root_dir, subfolder_name, eval_path, load_path, 
     else:
         # If no dev_idcs are given, get pre-calculated dev_idcs created during preprocessing
         if dev_idcs is None:
-            df_load = "yeo_Y/z/median/uni_clip_0.9999/multi_clip_N"
+            df_load = train_kwargs.df  #"yeo_Y/z/median/uni_clip_0.9999/multi_clip_N"
             dev_idcs, y_dev = get_dev_idcs_and_targets(df_load, 0, v=0, **data_type_kwargs)
         # Do a stratified k-fold split to perform optimization over
         skf = StratifiedKFold(n_splits=inner_splits, shuffle=True)
@@ -159,7 +153,7 @@ def _create_study(train_kwargs, root_dir, subfolder_name, eval_path, load_path, 
         # Dump args
         path = os.path.join(root_dir, subfolder_name)
         os.makedirs(path, exist_ok=True)
-        save_args = [subfolder_name, metric, pruner_name, skf_idcs, train_kwargs, tuning_ranges, df, dts, m, features,
+        save_args = [subfolder_name, metric, pruner_name, skf_idcs, train_kwargs, tuning_ranges, df, m, features,
                      freeze_prepro, cache_dir, metric]
         joblib.dump(save_args, os.path.join(path, 'args.pkl'))
 
@@ -171,8 +165,8 @@ def _create_study(train_kwargs, root_dir, subfolder_name, eval_path, load_path, 
             study = optuna.create_study(direction="maximize", pruner=pruner, sampler=sampler, study_name=subfolder_name)
 
     # Create objective
-    objective = Objective(skf_idcs, train_kwargs, tuning_ranges, df, dts, m, features, freeze_prepro, cache_dir, metric,
-                          pp)
+    objective = Objective(skf_idcs, train_kwargs, tuning_ranges, df, m, features, freeze_prepro,
+                          cache_dir, metric, pp)
 
     return study, objective, subfolder_name, cache_dir
 
@@ -183,28 +177,20 @@ def run_optimize_call(arg_tuple):
                      shell=True)
 
 
-def run_optimization(train_args, model_type, nt, df='mock', nf_inner=3, load_path=None, eval_path=None, pruner='median',
-                     pp=0,
-                     metric='prauc', tuning_ranges=None,
-                     dts='clinical', imaging_pca_var=0.8, freeze_prepro=0,
-                     features=None,
-
-                     dev_idcs=None, y_dev=None,
-
-                     save_tune=False):
+def run_optimization(train_args, model_type, nt, df='mock', nf_inner=3, load_path=None,
+                     eval_path=None, pruner='median', pp=0, metric='prauc', tuning_ranges=None,
+                     freeze_prepro=0, features=None, dev_idcs=None, y_dev=None, save_tune=False):
     """Run the hyperparameter optimization and store parameters, metrics and study object."""
     root_dir = "optuna_studies"
-    subfolder_name = _get_path(eval_path=eval_path, load_path=load_path, model_name=model_type, metric=metric,
-                               nf=nf_inner,
-                               pruner=pruner,
-                               dts=dts, nt=nt)
+    subfolder_name = _get_path(eval_path=eval_path, load_path=load_path, model_name=model_type,
+                               metric=metric, nf=nf_inner, pruner=pruner, nt=nt)
     # Create dev_idcs
     # Create study and objective. Args might be changed if a study is loaded
-    study, objective, subfolder_name, cache_dir = _create_study(train_args, root_dir, subfolder_name, eval_path,
-                                                                load_path,
-                                                                metric, pruner, save_tune,
-                                                                tuning_ranges, df, dts, imaging_pca_var, model_type,
-                                                                features, freeze_prepro,
+    study, objective, subfolder_name, cache_dir = _create_study(train_args, root_dir,
+                                                                subfolder_name, eval_path,
+                                                                load_path, metric, pruner,
+                                                                save_tune, tuning_ranges, df,
+                                                                model_type, features, freeze_prepro,
                                                                 dev_idcs, nf_inner, y_dev, pp)
 
     path = os.path.join(root_dir, subfolder_name)
