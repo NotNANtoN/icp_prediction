@@ -170,12 +170,9 @@ def start_training(v=0, m=None, model_args=None, callbacks=None, score_fnc_name=
 
     # Populate training and testing data structures
     x_train, y_train, x_eval, y_eval, n_features, feature_names, class_weights = \
-        get_data(df_name=df, split=split, nf=nf, v=v, blood=blood, static=static, clinical=clinical, imaging=imaging,
-                 imaging_pca=imaging_pca, miss_feats=miss_feats, imaging_pca_var=imaging_pca_var,
-                 features=features, sparse_img=sparse_img,
-                 dev_idcs=dev_idcs, test_idcs=test_idcs,
+        get_data(df_name=df, split=split, nf=nf, v=v, miss_feats=miss_feats,
+                 features=features, dev_idcs=dev_idcs, test_idcs=test_idcs,
                  train_idcs=train_idcs, val_idcs=val_idcs)
-
 
     if v > 0:
         print("Training shape in train: ", x_train[0].shape)

@@ -42,8 +42,8 @@ def _create_compound_label(df, columns):
     pos_class_idcs = df.index[df[columns].any(axis=1)].tolist()
     df[constants.label_col] = np.zeros(len(df))
     df.loc[pos_class_idcs, constants.label_col] = 1
-    df[constants.label_col] = df[constants.label_col].astype('int')
-    print("Targets", set(df[constants.label_col]))
+    df[constants.label_col] = df[constants.label_col].astype(int)
+    print("Target values", set(df[constants.label_col]))
     print(f"Number of cases with positive target {len(pos_class_idcs)}")
     return df
 
@@ -59,13 +59,13 @@ def _one_hot(df, columns):
             in enumerate(sorted(dummies.columns))]
         # also if nan, set last dummy to 1 (= "weiß nicht/ kA")
         if df[c].isna().sum() > 0:
-            dummies.loc[df[c].isna(), dummies.columns[-1]] = 1.0
+            dummies.loc[df[c].isna(), dummies.columns[-1]] = 1
         df = df.drop(c, axis=1)
         df = pd.concat([df, dummies], axis=1)
     return df
 
 
-def _convert_categorical_to_float(df):
+def _convert_categorical_to_int(df):
     columns = df.select_dtypes(include=['category']).columns
     for c in columns:
         df[c] = df[c].astype(float)
@@ -76,7 +76,7 @@ def _single_val_to_bin(df):
     # Some questions only had 1 as response, else nan
     for c in df.columns:
         if len(set(df[c].dropna())) == 1:
-            df[c] = df[c].fillna(0.0)
+            df[c] = df[c].fillna(0)
     return df
 
 
@@ -136,7 +136,7 @@ def _create_missing_feat_list(df):
     for col in nans.columns:
         if nans[col].sum() == 0:
             nans = nans.drop(columns=[col])
-    nans = nans.add_suffix("_nan").astype(float)
+    nans = nans.add_suffix("_nan")
     df = pd.concat([df, nans], axis=1)
     # Go through full list again bc. some features where declared as nan-features beforehand
     missing_feat_names = [c for c in df.columns if "_nan" in c]
@@ -149,26 +149,25 @@ def get_and_store_all_data(data_dir, lists_path):
 
     text_to_val_df = _load_variable_values_df(variable_names_path)
     df = _load_data(data_path, text_to_val_df)
-
     df = _dontknow_to_mean(df, constants.ordinal_questions)
     df = _dontknow_to_lowest(df, constants.preconditions_when)
     df = _replace_nan_placeholder(df, text_to_val_df, constants.interval_questions)
-    df = _convert_categorical_to_float(df)
+    df = _convert_categorical_to_int(df)
     df = _single_val_to_bin(df)
 
     for l in [constants.to_one_hot, constants.expect_change, constants.reduced_income,
               constants.age_kids, constants.not_always_applicable]:
         df = _one_hot(df, l)
 
+    df = df.drop(constants.drop_variables_list, axis=1)
     assert _check_only_nvars_have_nan(df)
 
-    df = _create_compound_label(df, constants.compound_label_cols_only_tested)
     df = _handle_low_std_variables(df, delete=False, threshold=0.02)
-    df = df.drop(constants.drop_variables_list, axis=1)
-    df = df.apply(lambda c: c.astype(float))
+    df[constants.non_categorical] = df[constants.non_categorical].apply(lambda c: c.astype(float))
     df, missingness_features = _create_missing_feat_list(df)
+    df = _create_compound_label(df, constants.compound_label_cols_only_tested)
     # save names of input features
-    input_features = [c for c in df.columns if c != constants.label_col]
+    input_features = [c for c in df.columns if c != constants.label_col and c not in constants.compound_label_cols_incl_diagnosed]
     input_name_list_dir = os.path.join(lists_path, "feature_lists")
     os.makedirs(input_name_list_dir, exist_ok=True)
     for name, l in zip(["input_features", "missing_feat_names"], [input_features, missingness_features]):

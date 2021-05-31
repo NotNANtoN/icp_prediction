@@ -63,6 +63,7 @@ def create_preds_and_reshape(clf, x, y):
     y_pred_logits = clf.predict_proba(x)
     y_pred = clf.predict(x)
     y_pred_logits, y_pred, y_true = correct_target_shape(y_pred_logits, y_pred, y)
+
     return y_pred_logits, y_pred, y_true
 
 

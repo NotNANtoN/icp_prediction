@@ -53,6 +53,8 @@ interval_questions = ['nf33a', 'nf33b', 'nf34a', 'nf34b', 'nf35a', 'nf35b', 'nf3
                       'nf42', 'nf76', 'nf77', "nf82", "nf83", "nf84", 'nf88', 'nf92', 'nf94',
                       'nt1', 'nt2']
 
+non_categorical = ordinal_questions + preconditions_when + interval_questions
+
 # to be one-hot encoded
 
 to_one_hot = ["f2a", "f2b", "f38", "f39", "f40", "f43", 'f44_1', 'f44_2', 'f44_3', 'f44_4',

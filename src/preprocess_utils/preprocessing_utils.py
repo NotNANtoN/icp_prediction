@@ -15,7 +15,7 @@ import src.constants as constants
 
 def apply_yeojohnson(df):
     # Remove col names that should not be yeo-johnsoned:
-    col_names = list(df.columns)
+    col_names = list(constants.non_categorical)
     # - remove categorical features from list
     no_yeo_categorical = _get_categorical_cols(df)
     # - remove features that were before shown to map to one single value after yeo
