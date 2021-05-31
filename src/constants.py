@@ -4,7 +4,7 @@ label_col = "target"
 
 gender = ['ges_1', 'ges_2', 'ges_3', 'ges_4']
 
-drop_variables_list = ["altqx", "regbez", "lkrs", 'f1a_3', 'f1a_4',
+drop_variables_list = ["sernr", "altqx", "regbez", "lkrs", 'f1a_3', 'f1a_4',
                        'f1a_5', 'f1a_6', 'f1b_3', 'f1b_4', 'f1b_5', 'f1b_6', 'f2a_3', 'f2a_4',
                        'f2b_3', 'f2b_4'] + ['f1a_2', 'f1b_2', 'f2a_2', 'f2b_2']
                                                             # diagnosed
