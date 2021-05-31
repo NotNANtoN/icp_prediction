@@ -41,7 +41,9 @@ def _check_only_nvars_have_nan(df):
 def _create_compound_label(df, columns):
     pos_class_idcs = df.index[df[columns].any(axis=1)].tolist()
     df[constants.label_col] = np.zeros(len(df))
-    df.loc[pos_class_idcs, "target"] = 1.0
+    df.loc[pos_class_idcs, constants.label_col] = 1
+    df[constants.label_col] = df[constants.label_col].astype('int')
+    print("Targets", set(df[constants.label_col]))
     print(f"Number of cases with positive target {len(pos_class_idcs)}")
     return df
 
