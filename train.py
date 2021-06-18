@@ -73,6 +73,8 @@ def _init_model(m, feature_names, class_weight_tensor, callbacks, use_class_weig
     elif m == 'xgb':
         model = xgb.XGBClassifier(n_jobs=1,
                                   class_weights=class_weights,
+                                  eval_metric="logloss",
+                                  use_label_encoder=False,
                                   **model_kwargs)
     elif m == 'svc':
         model = SVC(class_weight=class_weights,

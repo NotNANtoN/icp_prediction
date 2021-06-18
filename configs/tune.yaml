@@ -1,7 +1,7 @@
 defaults:
   - tune_model: ???  #choices=['torch', 'rf', 'xgb', 'svc', 'mlp', 'log'])
 
-df: yeo_N/normalization_None/median/uni_clip_0.9999/multi_clip_N # 'path to the preprocessed data folder from `data` parent folder.'If set to \'mock\', the
+df: yeo_N/normalization_z/median/uni_clip_0.9999/multi_clip_N # 'path to the preprocessed data folder from `data` parent folder.'If set to \'mock\', the
   #UCI ML Breast Cancer dataset will be used.'
 features:  # path to pkl file of pre-selected features
 nt: 10000
@@ -11,12 +11,8 @@ eval_path:  # name of study to eval
 pruner: median  # asha, median
 pp: 0  # parallel processes
 metric: prauc  # prauc, rocauc, acc
-freeze_prepro: 1  # Set to 1 to use frozen params for preprocessing
-#dts: imaging_blood_clinical  # Which features to use for optimization. Separated by comma, in
-  #any order can be:'
-                             # blood, imaging, imaging_pca and clinical.'
-                              # Can also be: "opt", then this selection will be tuned for.
-#imaging_pca_var: 0.8  # Explained variance used for PCA
+
+freeze_prepro: 1
 
 
 save_tune: 1

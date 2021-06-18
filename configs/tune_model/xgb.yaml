@@ -4,9 +4,9 @@ model_type: xgb
 
 tuning_ranges:
   n_estimators: [100, 250]
-  max_depth: [1, 8]
+  max_depth: [1, 10]
   learning_rate: [0.01, 0.3]
   subsample: [0.01, 1.0]  # fraction of features to subsample per depth step  
-  lambda: [0.0, 1.0]  #l2 reg term
-  alpha: [0.0, 1.0]  # l1 reg term
+  #lambda: [0.0, 1.0]  #l2 reg term
+  #  alpha: [0.0, 1.0]  # l1 reg term
   gamma: [0.0, 1.0]  # alias: min_split_loss - larger = more conservative

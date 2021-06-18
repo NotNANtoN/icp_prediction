@@ -1,0 +1,30 @@
+defaults:
+  - tune_model: ???  #choices=['torch', 'rf', 'xgb', 'svc', 'mlp', 'log'])
+
+df: yeo_N/normalization_z/median/uni_clip_0.9999/multi_clip_N # 'path to the preprocessed data folder from `data` parent folder.'If set to \'mock\', the
+  #UCI ML Breast Cancer dataset will be used.'
+features:  # path to pkl file of pre-selected features
+nt: 10000
+nf_inner: 3  # number of inner k-folds
+load_path:  # name of study to continue training
+eval_path:  # name of study to eval
+pruner: median  # asha, median
+pp: 0  # parallel processes
+metric: prauc  # prauc, rocauc, acc
+
+freeze_prepro: 1
+
+
+save_tune: 1
+
+tuning_ranges:
+  # general training
+  use_class_weights: [0, 1]
+  pos_weight: [0.1, 10.0]
+  # preprocessing steps
+  yeo: [0, 1]
+  fill: ['median', 'iterative', 'minus']
+  norm: ['z', 'minmax']
+  remove_outliers: [0.95, 0.999, 0.9999]
+  remove_multi_outliers: [0, 1]
+  miss_feats: 0 #[0, 1]

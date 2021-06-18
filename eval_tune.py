@@ -19,8 +19,8 @@ def main(cfg):
     # Get path to save results
     eval_tune_folder = 'results_eval_tune'
     time_str = timestring()
-    subfolder_name = f'{time_str}_{cfg.model}_{cfg.nt // 1000}k_{"freeze" if cfg.freeze_prepro else cfg.df}_' \
-                     f'{cfg.nf_outer}_{cfg.nf_inner}_{cfg.dts}'
+    subfolder_name = f'{time_str}_{cfg.model}_{cfg.nt // 1000}k_' \
+                     f'{cfg.nf_outer}_{cfg.nf_inner}'
     path = os.path.join(eval_tune_folder, subfolder_name)
     os.makedirs(path, exist_ok=True)
     # Save eval_tune hyperparams
@@ -34,17 +34,9 @@ def main(cfg):
     tune_cfg, train_cfg = get_tune_args(override_dict=cfg)
 
     # Load data once to determine splits
-    dts = cfg['dts']
-    blood = 'blood' in dts
-    clinical = 'clinical' in dts
-    imaging_pca = 'imaging_pca' in dts
-    imaging = ('imaging' in dts) and not imaging_pca
-    sparse_img = 'sparse_img' in dts
-    df = "yeo_Y/z/median/uni_clip_0.9999/multi_clip_N"
+    df = "yeo_N/normalization_z/median/uni_clip_0.9999/multi_clip_N"
     x_train, y_train, x_eval, y_eval, n_features, feature_names, class_weights = \
         get_data(df_name=df, split='no-split', nf=0, v=0,
-                 blood=blood, static=1, clinical=clinical, imaging=imaging,
-                 imaging_pca=imaging_pca, sparse_img=sparse_img,
                  miss_feats=0,
                  )
     x_train, y_train, x_eval, y_eval = x_train[0], y_train[0], x_eval[0], y_eval[0]
@@ -56,9 +48,7 @@ def main(cfg):
         y_dev, y_eval = y_train[dev_idcs], y_train[test_idcs]
         # Run hyperparameter tuning:
 
-        value, hyperparams, trial, best_train_args = run_optimization(dev_idcs=dev_idcs, y_dev=y_dev,
-                                                                      train_args=train_cfg,
-                                                                      **tune_cfg)
+        value, hyperparams, trial, best_train_args = run_optimization(dev_idcs=dev_idcs, y_dev=y_dev, train_args=train_cfg, **tune_cfg)
         print(value, hyperparams, best_train_args)
         # Set training hyperparams to best hyperparams found during tuning
         """

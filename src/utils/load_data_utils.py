@@ -10,10 +10,11 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 import src.constants as constants
 
 
-def read_covid_data(name, v=1, miss_feats=1, features=None):
-    if "pi_corona" in os.getcwd():
+def read_covid_data(name, v=1, miss_feats=0, features=None):
+    wd = os.getcwd()
+    if "pi_corona" in wd.split("/")[-1]:
         base_path = "data/"
-    elif "src" in os.getcwd():
+    elif "src" in wd.split("/")[-1]:
         base_path = "../data/"
     else:
         base_path = "../../data/"

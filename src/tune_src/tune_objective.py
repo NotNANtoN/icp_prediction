@@ -123,8 +123,8 @@ class Objective:
         self.add_int(trial, 'max_depth')
         self.add_float(trial, 'learning_rate')
         self.add_float(trial, 'subsample')
-        self.add_float(trial, 'lambda')
-        self.add_float(trial, 'alpha')
+        #self.add_float(trial, 'lambda')
+        #self.add_float(trial, 'alpha')
         self.add_float(trial, 'gamma')
 
     def svc(self, trial):

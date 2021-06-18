@@ -1,0 +1,13 @@
+# @package _global_
+
+m: xgb
+
+model_args:
+  n_estimators: 100
+  max_depth: 3
+  learning_rate: 0.1
+  seed: 42
+  subsample: 1
+  lambda: 1.0  #l2 reg term
+  alpha: 0.0  # l1 reg term
+  gamma: 0.0  # alias: min_split_loss - larger = more conservative

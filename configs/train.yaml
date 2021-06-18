@@ -2,8 +2,8 @@ defaults:
   - model_type: xgb # choices=['torch', 'rf', 'xgb', 'svc', 'mlp', 'log']
 
 
-df: yeo_N/normalization_None/median/uni_clip_0.9999/multi_clip_N  # path to the preprocessed data
-  #folder from `data` parent folder.'
+df: yeo_N/normalization_z/median/uni_clip_0.9999/multi_clip_N  # path to the preprocessed data
+  #folder from `data` parent folde.'
     #'If set to \'mock\', the UCI ML Breast Cancer dataset will be used.')
 split: train/val  # choices=['train/test', 'train/val', 'dev/test', 'dev/val', 'no-split']
 nf: 0  # k-fold k

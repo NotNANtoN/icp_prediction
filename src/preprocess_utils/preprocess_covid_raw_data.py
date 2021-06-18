@@ -5,6 +5,11 @@ import pandas as pd
 
 import src.constants as constants
 
+def _dontknow_to_nan(df, columns):
+    # replace "don't know" columns with NaN
+    for c in columns:
+        df[c] = df[c].replace({max(df[c]) : np.nan})
+    return df
 
 def _dontknow_to_mean(df, columns):
     # Replace "don't know" with mean
@@ -23,12 +28,15 @@ def _dontknow_to_lowest(df, columns):
 def _replace_nan_placeholder(df, text_to_val_df, columns, minus_one=False):
     # Replace 99, 999 etc. by np.nan
     for c in columns:
-        if not minus_one:
-            nan_placeholder = text_to_val_df.loc[text_to_val_df['Name'] == c, 'Value'].to_list()[0]
-        else:
+        if minus_one:
             nan_placeholder = -1.0
+        else:
+            nan_placeholder = text_to_val_df.loc[text_to_val_df['Name'] == c, 'Value'].to_list()[0]
         if c in df.columns:
+            #print(c, " has nan placeholder ", nan_placeholder)
             df[c] = df[c].replace(nan_placeholder, np.nan)
+        else:
+            print("Warning! ", c, " is not in the df in _replace_nan_placeholder")
     return df
 
 
@@ -124,14 +132,17 @@ def _load_data(path, text_to_val_df):
 
 
 def _handle_low_std_variables(df, delete, threshold=0.01):
-    low_var_found = [c for c in df.columns if df[c].std() < 0.01]
+    print("Num cols before std filter:", len(df.columns))
+    low_var_found = [c for c in df.columns if df[c].std() < threshold]
     if len(low_var_found) == 0:
         return df
+    print("Std threshold: ", threshold)
     #print(f"The following variables have a std below {threshold}:\n{low_var_found}")
     for c in low_var_found:
         if delete and c != constants.label_col:
-                print(f"Removing {c} with value counts: \n{df[c].value_counts()}")
-                df = df.drop(c, axis=1)
+            print(f"Removing {c} with std {df[c].std()} and value counts: \n{df[c].value_counts()}")
+            df = df.drop(c, axis=1)
+    print("Num cols after std filter:", len(df.columns))
     return df
 
 
@@ -141,9 +152,9 @@ def get_and_store_all_data(data_dir, lists_path):
 
     text_to_val_df = _load_variable_values_df(variable_names_path)
     df = _load_data(data_path, text_to_val_df)
-    # set "don't know" responses to mean where plausible
-    df = _dontknow_to_mean(df, constants.ordinal_questions)
-    # set "don't know" responses to lowest value where plausible
+    # set "don't know" responses to nan
+    df = _dontknow_to_nan(df, constants.ordinal_questions)
+    # set some "don't know" responses to lowest value where plausible
     df = _dontknow_to_lowest(df, constants.preconditions_when)
     # replace the nan-placeholders by np.nan (can be 99, 999, 9999, 99999, -1 - to my knowledge)
     df = _replace_nan_placeholder(df, text_to_val_df, constants.interval_questions)
@@ -154,8 +165,7 @@ def get_and_store_all_data(data_dir, lists_path):
     df = _single_val_to_bin(df)
 
     # one-hot encode selected variables
-    for l in [constants.to_one_hot, constants.expect_change, constants.reduced_income,
-              constants.age_kids, constants.not_always_applicable]:
+    for l in [constants.to_one_hot]:
         df = _one_hot(df, l)
 
     # drop some variables or ordinal categories (like some response options of the target questions)
@@ -163,14 +173,50 @@ def get_and_store_all_data(data_dir, lists_path):
 
     # only the numeric/interval variables should have nans now bc. for every other question
     # they're encoded
-    assert _check_only_nvars_have_nan(df)
+    #assert _check_only_nvars_have_nan(df)
 
-    # remove variables with especially low standard deviation
-    df = _handle_low_std_variables(df, delete=False, threshold=0.02)
     # set non_categorical variables to float
     df[constants.non_categorical] = df[constants.non_categorical].apply(lambda c: c.astype(float))
+    
     # create label based on aggregate of constants.compound_label_cols_only_tested
     df = _create_compound_label(df, constants.compound_label_cols_only_tested)
+    
+    # remove columns needed for label creation
+    print("Cols before label removal:", len(df.columns))
+    df = df.drop(columns=[col for col in df.columns if any([stem in col for stem in constants.label_stem_names])])
+    print("Cols after label removal:", len(df.columns))
+    
+    # remove variables with especially low standard deviation
+    df = _handle_low_std_variables(df, delete=True, threshold=0.05)
+    
+    # check missingness
+    for col in df.columns:
+        missingness_frac = df[col].isna().mean()
+        if missingness_frac > 0.5:
+            print(col, " has ", missingness_frac, " NaNs and is therefore removed")
+            df = df.drop(columns=[col])
+            
+            
+    # check correlations
+    def remove_correlations(dataset, threshold):
+        # remove target from this correlation table as we want to keep features that are highly correlated with the target
+        target = list(dataset["target"])
+        dataset = dataset.drop(columns=["target"])
+        print("Cols before corr:", len(dataset.columns))
+        col_corr = set() # Set of all the names of deleted columns
+        corr_matrix = dataset.corr()
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i):
+                if (abs(corr_matrix.iloc[i, j]) >= threshold) and (corr_matrix.columns[j] not in col_corr):
+                    colname = corr_matrix.columns[i] # getting the name of column
+                    col_corr.add(colname)
+                    if colname in dataset.columns:
+                        del dataset[colname] # deleting the column from the dataset
+        print("Cols after corr:", len(dataset.columns))
+        dataset["target"] = target
+        return dataset
+    df = remove_correlations(df, 0.90)
+    
     return df
 
 
