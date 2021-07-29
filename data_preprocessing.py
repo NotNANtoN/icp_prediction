@@ -7,13 +7,12 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, '')
-from src.preprocess_utils.create_corpus_utils import store_df, create_devtest_splits_and_save, \
-    create_trainval_splits_and_save
+from src.preprocess_utils.create_corpus_utils import create_balanced_split
 from src.preprocess_utils.preprocessing_utils import apply_yeojohnson, remove_univariate_outliers, \
     remove_multivariate_outliers, normalize, create_missing_feat_list
 from src.preprocess_utils.missing_utils import fill_missings
 from src.preprocess_utils.argparser import create_argparser, check_exp_id
-from src.preprocess_utils.preprocess_covid_raw_data import get_and_store_all_data
+from src.preprocess_utils.preprocess_icp import get_and_store_all_data
 from src.utils.args import read_args
 import src.constants as constants
 
@@ -23,9 +22,10 @@ This script performs all pre-processing steps and allows for selection of applie
 """
 
 
-def out_dir_name(yeo, norm_method, fill_method, remove_outliers, remove_multi_outliers):
+def out_dir_name(minutes, yeo, norm_method, fill_method, remove_outliers, remove_multi_outliers):
     """Determine name of output directory with respect to the performed procedures."""
-    name = "yeo_" + ("Y" if yeo else "N")
+    name = str(minutes) + "_"
+    name = join(name, "yeo_" + ("Y" if yeo else "N"))
     name = join(name, "normalization_" + (norm_method if norm_method else "None"))
     name = join(name, fill_method)
     name = join(name, "uni_clip_" + (str(remove_outliers) if remove_outliers else "N"))
@@ -34,7 +34,7 @@ def out_dir_name(yeo, norm_method, fill_method, remove_outliers, remove_multi_ou
 
 
 def _create_dest_dir(outpath, args):
-    path = join(outpath, out_dir_name(args.yeo, args.norm_method, args.fill_method, args.remove_outliers,
+    path = join(outpath, out_dir_name(args.minutes, args.yeo, args.norm_method, args.fill_method, args.remove_outliers,
                                       args.remove_multi_outliers))
     os.makedirs(path, exist_ok=True)
     return path
@@ -73,12 +73,11 @@ def _prep_data_get_devset(df, outpath):
     return df, dev_idcs, test_idcs
 
 
-def preprocess(df, outpath, dev_idcs, test_idcs, args):
+def preprocess(inputs, targets, outpath, dev_idcs, test_idcs, args):
     """Do all preprocessing steps.
 
     Args:
     -------
-        df (pandas.DataFrame) : raw data
         outpath (path-like): destination of the preprocessed data
         args (Namespace): commandline input
     """
@@ -88,26 +87,47 @@ def preprocess(df, outpath, dev_idcs, test_idcs, args):
     path = _create_dest_dir(outpath, args)
     os.makedirs(path, exist_ok=True)
 
-    no_var_cols = df.loc[:, [col for col in df.columns if df[col].std() == 0]]
-    assert len(no_var_cols.columns) == 0, no_var_cols.columns
-
     # Apply Yeo-Johnson transformation if flagged
     if args.yeo:
         df = apply_yeojohnson(df)
 
-    no_var_cols = df.loc[:, [col for col in df.columns if df[col].std() == 0]]
-    assert len(no_var_cols.columns) == 0, no_var_cols.columns
-
     # Normalization:
-    if args.norm_method is not None:  # Decision tree based methods don't require scaling
-        df = normalize(df, method=args.norm_method)
+    if args.norm_method is not None: 
+        inputs = normalize(inputs, method=args.norm_method)
 
-    # Fill NaNs:
-    df = fill_missings(df, args.fill_method, args.estimator)
+    fill_nans = False
+    
+    import src.constants as constants
+    label_col = constants.label_col
+    
+    if fill_nans:
+        # Fill NaNs:
 
-    # Outlier detection & handling per dataframe
-    df, new_dev_idcs = _remove_outliers(df, dev_idcs, test_idcs, path, args)
+        # TODO: Fix merging and separating of targets and inputs! Atm the df is just doubled in length insted of adding the proper columns
 
+        targets = targets[label_col]
+        inputs[label_col] = targets.to_list()
+        #df = pd.concat([inputs, targets])
+        df = fill_missings(inputs, args.fill_method, args.estimator)
+
+        # Outlier detection & handling per dataframe
+        inputs, targets = inputs.drop(columns=[label_col]), inputs[label_col]
+        inputs, new_dev_idcs = _remove_outliers(inputs, dev_idcs, test_idcs, path, args)
+
+        #df = pd.concat([inputs, targets])
+        inputs[label_col] = targets.to_list()
+        print(df)
+    else:
+        print(inputs.shape)
+        print(targets.shape)
+        df = pd.concat([inputs, targets], axis=1).drop_duplicates()
+        print(df.shape)
+    
+    create_balanced_split(df, path, [3, 5])
+    
+    return
+    
+    
     # Store full dataset w/o split/k-fold (multi-out removed here if applicable)
     if args.save:
         store_df(df, path)
@@ -139,6 +159,7 @@ def preprocess(df, outpath, dev_idcs, test_idcs, args):
 
 def setup_and_start_preprocessing(passed_args=None):
     parser = create_argparser()
+    parser.add_argument("--minutes", default=60)
     args = read_args(parser, passed_args)
     args = check_exp_id(args)
 
@@ -147,9 +168,15 @@ def setup_and_start_preprocessing(passed_args=None):
     #proj_root = os.path.abspath(join(dir_path, os.pardir))
     data_path = "data"
 
+    minutes = args.minutes
+    norm = "yeojo" # yeojo, z or minmax possible
+    
+    # stays constant (only varied for phase)
+    hour = 1
+    
     # Get dataset
-    df_raw = get_and_store_all_data(data_path, join("src", "preprocess_utils"))
-    df, dev_idcs, test_idcs = _prep_data_get_devset(df_raw, data_path)
+    inputs, targets = get_and_store_all_data(data_path, minutes, norm, hour)
+    #dev_idcs, test_idcs = create_devtest_splits_and_save(inputs, data_path)
 
     # Start pre-processing
     if args.all:
@@ -164,7 +191,7 @@ def setup_and_start_preprocessing(passed_args=None):
                             args.fill_method = fill
                             args.remove_outliers = uni
                             args.remove_multi_outliers = multi
-                            preprocess(copy.deepcopy(df), data_path, dev_idcs, test_idcs, args)
+                            preprocess(copy.deepcopy(inputs), copy.deepcopy(targets), data_path, dev_idcs, test_idcs, args)
     else:
         print("Starting pre-processing with the following settings: \n\t{}{}{}{}{}\n"
               .format(("- Yeo Johnson\n\t" if args.yeo else ""),
@@ -177,7 +204,7 @@ def setup_and_start_preprocessing(passed_args=None):
                       (f"- Remove outliers with {args.remove_outliers} quantile\n\t" if args.remove_outliers else ""),
                       ("- Apply IsolationForest for multivariate outlier removal\n" if args.remove_multi_outliers
                        else "")))
-        preprocess(df, data_path, dev_idcs, test_idcs, args)
+        preprocess(copy.deepcopy(inputs), copy.deepcopy(targets), data_path, None, None, args)
     return True
 
 
