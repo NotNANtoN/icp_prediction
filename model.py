@@ -41,7 +41,7 @@ class LitSeqModel(pl.LightningModule):
         hiddens = None
         inputs, targets, lens = batch
         loss = self.calc_loss(inputs, targets, hiddens, lens=lens)
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         return loss
         #return {"loss": loss}#, "hiddens": self.hiddens}
     
@@ -155,12 +155,34 @@ class LitSeqModel(pl.LightningModule):
         
         return pat
             
+        
+class LitMLP(LitSeqModel):
+    def __init__(self, feature_names, hidden_size=256, dropout_val=0.2,lr=0.001, **kwargs):
+        super().__init__(feature_names, **kwargs)
+                
+        self.hidden_size = hidden_size
+        self.out_size = 1
+        self.lr = lr
+        
+        # define model
+        # out part
+        self.out_mlp = torch.nn.Sequential(
+            torch.nn.Linear(self.num_recurrent_inputs + self.num_static_inputs, self.hidden_size), 
+            torch.nn.ReLU(True),
+            torch.nn.Linear(self.hidden_size, self.out_size))
+        # define loss 
+        self.loss_func = SequentialLoss()
+        
+    def forward(self, 
+                x: torch.Tensor, 
+                lens: Optional[torch.Tensor] = None, 
+                hiddens: Optional[Tuple[torch.Tensor, torch.Tensor]] = None):
+        return self.out_mlp(x)
 
 class LitRNN(LitSeqModel):
     def __init__(self, feature_names, hidden_size=256, dropout_val=0.2, lstm_layers=1, lr=0.001, **kwargs):
         super().__init__(feature_names, **kwargs)
                 
-
         self.hidden_size = hidden_size
         self.out_size = 1
         self.lr = lr

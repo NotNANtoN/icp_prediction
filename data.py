@@ -1,3 +1,4 @@
+import math
 import random
 
 import torch
@@ -84,10 +85,25 @@ class SequenceDataset(torch.utils.data.IterableDataset):
             while True:
                 idx = random.randint(0, len(self.targets) - 1)
                 yield self[idx]
-        else:
+        else:   
+            start = 0
+            end = len(self.targets)
+
+            worker_info = torch.utils.data.get_worker_info()
+            if worker_info is None:  # single-process data loading, return the full iterator
+                iter_start = start
+                iter_end = end
+            else:  # in a worker process
+                 # split workload
+                per_worker = int(math.ceil((end - start) / float(worker_info.num_workers)))
+                worker_id = worker_info.id
+                iter_start = start + worker_id * per_worker
+                iter_end = min(iter_start + per_worker, end)
+        
             # validation and test sets
-            for idx in range(len(self.targets)):
+            for idx in range(iter_start, iter_end):
                 yield self[idx]
+                
 
     #def __len__(self):
     #    return len(self.targets)
