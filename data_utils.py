@@ -12,10 +12,11 @@ import pytorch_lightning
 import numba
 
 
-def get_seq_list(minutes, norm_targets, target_name, features=None):
+def get_seq_list(minutes, norm_targets, target_name, features=None, verbose=True):
     # read df
     df_path = f"data/{minutes}_/yeo_N/normalization_None/median/uni_clip_0.9999/multi_clip_N/df.pkl"
-    print("Reading df from: ", df_path)
+    if verbose:
+        print("Reading df from: ", df_path)
     df = pd.read_pickle(df_path)
     if norm_targets:
         df[target_name] = df[target_name] / df[target_name].std()

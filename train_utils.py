@@ -1,9 +1,101 @@
+import os
+import logging
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import pandas as pd
-from model import LitRNN, LitTransformer, LitMLP
+from model import LitRNN, LitTransformer, LitMLP, LucidTransformer
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
+
+from data_utils import make_split, do_fold
+
+
+def default_args():
+    # hyperparams
+    args = {}
+    # data args
+    args["minutes"] = 60
+    args["norm_method"] = None # z, None
+    all_dbs = ["eICU", "UKE", "MIMIC"]
+    args["dbs"] = ["UKE"]  #"all" # ["eICU", "UKE", "MIMIC"], all
+    args["k_fold"] = 0
+    args["num_splits"] = 3
+    args["flat_block_size"] = 0
+    args["model_type"] = "xgb"
+    args["features"] = None
+
+    model_args = {}
+    # dataloader args
+    model_args["train_noise_std"] = 0.01
+    model_args["random_starts"] = True
+    model_args["min_len"] = 20
+    # preprocess args
+    model_args["fill_type"] = "pat_ema" # "pat_mean", "mean", "pat_ema" "pat_ema_mask"
+    # training args
+    model_args["max_steps"] = 100
+    model_args["val_check_interval"] = 100  # check validation performance every N steps
+    model_args["grad_clip_val"] = 1.0
+    #epochs = 10
+    model_args["lr"] = 0.0001
+    model_args["bs"] = 8
+    # model args
+    model_args["hidden_size"] = 512
+    model_args["dropout"] = 0.1
+    model_args["rnn_layers"] = 1
+    model_args["rnn_type"] = "gru"
+    # transfomrer
+    model_args["n_layers"] = 3
+    model_args["n_heads"] = 4
+    model_args["emb_dim"] = 256
+    #linear
+    model_args["alpha"] = 1
+    model_args["l1_ratio"] = 0.5
+    # xgb+rf
+    model_args["n_estimators"] = 50
+    model_args["max_depth"] = 6 
+    model_args["min_child_weight"] = 1 # 1-inf
+    model_args["gamma"] = 0.0 # 0-inf
+    model_args["subsample"] = 1.0 # 0.0-1.0
+    model_args["colsample_bytree"] = 1.0 # 0.-1.0
+    model_args["tree_method"] = "gpu_hist" # hist, gpu_hist
+
+    args["seed"] = 2
+    seed = pl.utilities.seed.seed_everything(seed=args["seed"], workers=False)
+    return args, model_args
+
+
+def retrain(dev_data, test_data, best_params, args, model_args, verbose=True):
+    # create splits
+    data_modules = do_fold(dev_data, test_data, 
+                           args["dbs"], 
+                           model_args["random_starts"], 
+                           model_args["min_len"], 
+                           model_args["train_noise_std"],
+                           model_args["bs"],
+                           model_args["fill_type"], 
+                           args["flat_block_size"],
+                           k_fold=0, 
+                           num_splits=10,
+                          )
+    # load best params
+    for key in best_params:
+        model_args[key] = best_params[key]
+    # retrain
+    models, trainers = train_model(args["model_type"], data_modules, model_args, verbose=True)
+    if verbose:
+        # print metrics
+        df = get_all_dfs(models, trainers, args["model_type"], dl_type="test")
+        print_all_metrics(df)
+        loss = df.groupby("model_id").apply(lambda model_df: model_df["error"]).mean()
+        print()
+        print("Loss: ", loss)
+        print("Std of loss: ", df.groupby("model_id").apply(lambda model_df: model_df["error"].std()))
+    return models, trainers
+
+
 
 
 # define model
@@ -14,22 +106,24 @@ def create_model(model_type, feature_names, model_args):
                        dropout_val=model_args["dropout"], 
                        rnn_layers=model_args["rnn_layers"], 
                        rnn_type=model_args["rnn_type"],
-                       lr=model_args["lr"] * 0.2,
+                       lr=model_args["lr"],
                         )
-    elif model_type == "transformer":
-        model = LitTransformer(feature_names,
-                               ninp=512, # embedding dimension
-                               nhead=16, # 2, # num attention heads
-                               nhid=1024, #the dimension of the feedforward network model in nn.TransformerEncoder
-                               nlayers=8, # the number of heads in the multiheadattention models
-                               dropout=0.2,
-                               lr=model_args["lr"] * 0.001  #0.00005,
+    elif model_type == "transformer" or model_type == "lucid_transformer":
+        model_class = LitTransformer if model_type == "transformer" else LucidTransformer
+        model = model_class(feature_names,
+                               ninp=model_args["emb_dim"], # embedding dimension
+                               nhead=model_args["n_heads"], # 2, # num attention heads
+                               nhid=model_args["hidden_size"], #the dimension of the feedforward network model in nn.TransformerEncoder
+                               nlayers=model_args["n_layers"], # the number of heads in the multiheadattention models
+                               dropout=model_args["dropout"],
+                               lr=model_args["lr"] #0.00005,
                                )
     elif model_type  == "mlp":
         model = LitMLP(feature_names, 
-                       hidden_size=256, 
-                       dropout_val=0.2, 
+                       hidden_size=model_args["hidden_size"], 
+                       dropout_val=model_args["dropout"], 
                        lr=model_args["lr"],)
+        
     #model = torch.jit.script(model)
     #model = model.to_torchscript()
     return model
@@ -41,7 +135,7 @@ def create_trainer(model_args, verbose=True):
     logger = pl.loggers.mlflow.MLFlowLogger(
         experiment_name='default', 
     )
-    logger.log_hyperparams(args)
+    logger.log_hyperparams(model_args)
     # early stopping and model checkpoint
     es = EarlyStopping(monitor='val_loss', patience=3, verbose=False, mode="min", check_on_train_epoch_end=False)
     #mc = ModelCheckpoint(monitor='val_loss', verbose=False, save_last=False, save_top_k=1,
@@ -53,7 +147,7 @@ def create_trainer(model_args, verbose=True):
                      }
     if not verbose:
         logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
-        pytorch_lightning.utilities.distributed.log.setLevel(logging.ERROR)
+        pl.utilities.distributed.log.setLevel(logging.ERROR)
         
 
 

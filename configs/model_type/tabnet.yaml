@@ -1,7 +1,0 @@
-# @package _global_
-
-m: tabnet
-
-model_args:
- n_d: 8
- n_a: 8

@@ -6,10 +6,12 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
+from x_transformers.x_transformers import AttentionLayers
 
 
 class LitSeqModel(pl.LightningModule):
-    def __init__(self, data_module, ema=0.99):
+    def __init__(self, data_module, ema=0.0):
         super().__init__()        
         self.data_module = data_module
         self.ema = ema
@@ -189,10 +191,9 @@ class LitRNN(LitSeqModel):
         x = self.out_mlp(static_stream + recurrent_stream)
         return x
 
-    
-class LitTransformer(LitSeqModel):
+class LucidTransformer(LitSeqModel):
     def __init__(self, 
-                 ntoken,  # vocab_size or num features
+                 data_module,  # vocab_size or num features
                  ninp=256, # embedding dimension
                  nhead=2, # num attention heads
                  nhid=256, #the dimension of the feedforward network model in nn.TransformerEncoder
@@ -200,26 +201,82 @@ class LitTransformer(LitSeqModel):
                  dropout=0.2,
                  lr=0.001,
                  **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(data_module, **kwargs)
         self.save_hyperparameters()
         
+        self.out_size = 1
+        self.lr = lr
+
+        self.model = ContinuousTransformerWrapper(
+            max_seq_len=1024,
+            attn_layers=AttentionLayers(
+                dim = nhid,
+                depth = nlayers,
+                heads = nhead,
+                causal=True,
+                rotary_pos_emb = True,
+                ff_glu = True, # set to true to use for all feedforwards
+                attn_num_mem_kv = 16, # 16 memory key / values
+            ),
+            dim_in = self.num_recurrent_inputs + self.num_static_inputs,
+            dim_out = self.out_size,
+            emb_dim = ninp,
+            emb_dropout = dropout,
+            use_pos_emb = True,
+        )
+        
+    def forward(self, x, hiddens=None, lens=None):
+        out = self.model(x)
+        return out
+
+class LitTransformer(LitSeqModel):
+    def __init__(self, 
+                 data_module,  # vocab_size or num features
+                 ninp=256, # embedding dimension
+                 nhead=2, # num attention heads
+                 nhid=256, #the dimension of the feedforward network model in nn.TransformerEncoder
+                 nlayers=2, # the number of heads in the multiheadattention models
+                 dropout=0.2,
+                 lr=0.001,
+                 **kwargs):
+        super().__init__(data_module, **kwargs)
+        self.save_hyperparameters()
+        
+        self.out_size = 1
+        self.hidden_size = ninp
+        # recurrent stream
+        ntoken = self.num_recurrent_inputs
         self.pos_encoder = PositionalEncoding(ninp, dropout)
         encoder_layers = torch.nn.TransformerEncoderLayer(ninp, 
                                                           nhead, 
                                                           dim_feedforward=nhid, 
                                                           dropout=dropout, 
-                                                          activation="gelu", 
-                                                          batch_first=True)
+                                                          activation="relu",)
+                                                          #batch_first=True)
         # (d_model, nhead, dim_feedforward=2048, dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=False, device=None, dtype=None)
         self.transformer_encoder = torch.nn.TransformerEncoder(encoder_layers, nlayers)
         self.encoder = torch.nn.Linear(ntoken, ninp)  #Embedding(ntoken, ninp)
         self.ninp = ninp
         self.decoder = torch.nn.Sequential(torch.nn.Linear(ninp, ninp), 
                                            torch.nn.ReLU(True), 
-                                           torch.nn.Linear(ninp, 1)
+                                           torch.nn.Linear(ninp, ninp)
                                           )
         
         self.lr = lr
+        
+        # static part
+        self.encode_static = torch.nn.Sequential(
+            torch.nn.Linear(self.num_static_inputs, self.hidden_size),
+            torch.nn.ReLU(True),
+            torch.nn.Linear(self.hidden_size, self.hidden_size),
+            #torch.nn.LayerNorm(normalized_shape=[self.hidden_size]),
+            torch.nn.ReLU(True),
+        )
+        # out part
+        self.out_mlp = torch.nn.Sequential(
+            torch.nn.Linear(self.hidden_size, self.hidden_size), 
+            torch.nn.ReLU(True),
+            torch.nn.Linear(self.hidden_size, self.out_size))
     
     def generate_square_subsequent_mask(self, sz):
         mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
@@ -232,10 +289,15 @@ class LitTransformer(LitSeqModel):
         self.decoder.bias.data.zero_()
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, src, hiddens=None, lens=None):
-        # bring into sequence first
-        #src = src.permute(1, 0, 2)
+    def forward(self, x, hiddens=None, lens=None):
+        recurrent_stream = x[..., self.recurrent_idcs]
+        static_stream = x[..., self.static_idcs]
         
+        # encode static inputs
+        static_stream = self.encode_static(static_stream)
+        
+        # bring into sequence first
+        src = recurrent_stream.permute(1, 0, 2)
         # create mask
         src_mask = self.generate_square_subsequent_mask(src.size(0)).to(src.device)
         # forward pass
@@ -243,11 +305,13 @@ class LitTransformer(LitSeqModel):
         src = self.pos_encoder(src)
         output = self.transformer_encoder(src, src_mask)
         output = self.decoder(output)
-        
         # bring into batch first again
-        #output = output.permute(1, 0, 2)
+        recurrent_stream = output.permute(1, 0, 2)
         
-        return output
+        # apply mlp to transform        
+        x = self.out_mlp(static_stream + recurrent_stream)
+        
+        return x
     
     
 class PositionalEncoding(torch.nn.Module):

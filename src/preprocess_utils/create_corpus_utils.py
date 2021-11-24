@@ -18,7 +18,7 @@ def _create_labels_icp(pat_data_list):
     #mean_short_crit = np.mean([pat["ICP_critical_short"].mean() for pat in pat_data_list])
     #mean_long_crit = np.mean([pat["ICP_critical_long"].mean() for pat in pat_data_list])
     mean_len = np.mean([len(pat) for pat in pat_data_list])
-    icps = [pat["ICP_pred"][~pat["ICP_pred"].isna()] for pat in pat_data_list]
+    icps = [pat["ICP_Vital"][~pat["ICP_Vital"].isna()] for pat in pat_data_list]
     icps = [i.mean() for i in icps]
     mean_icp = np.mean(icps)
     #print("Mean short crit: ", mean_short_crit)
@@ -30,7 +30,7 @@ def _create_labels_icp(pat_data_list):
             # pat_data["Geschlecht"].iloc[0].astype(str) +
             # pat_data["Outcome"].iloc[0].astype(str) +
             (len(pat_data) < mean_len).astype(int).astype(str) +
-            ((pat_data["ICP_pred"].mean() < mean_icp).astype(int).astype(str))
+            ((pat_data["ICP_Vital"].mean() < mean_icp).astype(int).astype(str))
             #(pat_data["ICP_critical_short"].mean() < mean_short_crit).astype(int).astype(str) +
             #(pat_data["ICP_critical_long"].mean() < mean_long_crit).astype(int).astype(str)
             for pat_data in pat_data_list]

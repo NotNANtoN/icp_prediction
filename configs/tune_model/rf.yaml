@@ -1,7 +1,0 @@
-# @package _global_
-
-model_type: rf
-
-tuning_ranges:
-  n_estimators: [100, 500]
-  max_depth: [1, 10]

@@ -172,7 +172,7 @@ def setup_and_start_preprocessing(passed_args=None):
     norm = "yeojo" # yeojo, z or minmax possible
     
     # stays constant (only varied for phase)
-    hour = 1
+    hour = 0
     
     # Get dataset
     inputs, targets = get_and_store_all_data(data_path, minutes, norm, hour)
