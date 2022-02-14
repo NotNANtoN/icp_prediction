@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import pandas as pd
-from model import LitRNN, LitTransformer, LitMLP, LucidTransformer
+from model import LitRNN, LitTransformer, LitMLP, LucidTransformer, LitCLIP, LitGPT
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
@@ -39,6 +39,8 @@ def default_args():
     model_args["val_check_interval"] = 100  # check validation performance every N steps
     model_args["grad_clip_val"] = 1.0
     #epochs = 10
+    model_args["max_epochs"] = 5
+    model_args["weight_decay"] = 0.1
     model_args["lr"] = 0.0001
     model_args["bs"] = 8
     # model args
@@ -61,6 +63,7 @@ def default_args():
     model_args["subsample"] = 1.0 # 0.0-1.0
     model_args["colsample_bytree"] = 1.0 # 0.-1.0
     model_args["tree_method"] = "gpu_hist" # hist, gpu_hist
+    
 
     args["seed"] = 2
     seed = pl.utilities.seed.seed_everything(seed=args["seed"], workers=False)
@@ -84,7 +87,7 @@ def retrain(dev_data, test_data, best_params, args, model_args, verbose=True):
     for key in best_params:
         model_args[key] = best_params[key]
     # retrain
-    models, trainers = train_model(args["model_type"], data_modules, model_args, verbose=True)
+    models, trainers = train_model(args["model_type"], data_modules, args, model_args, verbose=True)
     if verbose:
         # print metrics
         df = get_all_dfs(models, trainers, args["model_type"], dl_type="test")
@@ -100,13 +103,16 @@ def retrain(dev_data, test_data, best_params, args, model_args, verbose=True):
 
 # define model
 def create_model(model_type, feature_names, model_args):
+    general_keys = ["weight_decay", "max_epochs", "use_macro_loss",
+                    "use_pos_weight", "use_nan_embed", "lr"]
+    general_kwargs = {key: model_args[key] for key in general_keys}
     if model_type == "rnn":
         model = LitRNN(feature_names, 
                        hidden_size=model_args["hidden_size"], 
                        dropout_val=model_args["dropout"], 
                        rnn_layers=model_args["rnn_layers"], 
                        rnn_type=model_args["rnn_type"],
-                       lr=model_args["lr"],
+                       **general_kwargs
                         )
     elif model_type == "transformer" or model_type == "lucid_transformer":
         model_class = LitTransformer if model_type == "transformer" else LucidTransformer
@@ -116,57 +122,72 @@ def create_model(model_type, feature_names, model_args):
                                nhid=model_args["hidden_size"], #the dimension of the feedforward network model in nn.TransformerEncoder
                                nlayers=model_args["n_layers"], # the number of heads in the multiheadattention models
                                dropout=model_args["dropout"],
-                               lr=model_args["lr"] #0.00005,
+                                **general_kwargs
                                )
     elif model_type  == "mlp":
         model = LitMLP(feature_names, 
                        hidden_size=model_args["hidden_size"], 
                        dropout_val=model_args["dropout"], 
-                       lr=model_args["lr"],)
+                       **general_kwargs)
+    elif model_type == "clip":
+        model = LitCLIP(feature_names,
+                        clip_name=model_args["clip_name"],
+                        **general_kwargs)
+    elif model_type == "gpt":
+        model = LitGPT(feature_names,
+                       gpt_name=model_args["gpt_name"],
+                       **general_kwargs)
         
     #model = torch.jit.script(model)
     #model = model.to_torchscript()
     return model
 
 
-def create_trainer(model_args, verbose=True):
+def create_trainer(args, model_args, verbose=True):
     # default logger used by trainer
-    logger = None
-    logger = pl.loggers.mlflow.MLFlowLogger(
-        experiment_name='default', 
-    )
-    logger.log_hyperparams(model_args)
+    #logger = None
+    #logger = pl.loggers.mlflow.MLFlowLogger(
+    #    experiment_name='default', 
+    #)
+    
+    from pytorch_lightning.loggers import WandbLogger
+
+    wandb_logger = pl.loggers.WandbLogger(name=None, save_dir=None, offline=False, id=None, anonymous=None, version=None, project=args["target_name"],  log_model=False, experiment=None, prefix='')
+    hyperparam_dict = {**args, **model_args}
+    wandb_logger.log_hyperparams(hyperparam_dict)
+
+    # log gradients and model topology
+    #wandb_logger.watch(lit_model)
+
+    
     # early stopping and model checkpoint
     es = EarlyStopping(monitor='val_loss', patience=3, verbose=False, mode="min", check_on_train_epoch_end=False)
     #mc = ModelCheckpoint(monitor='val_loss', verbose=False, save_last=False, save_top_k=1,
     #                     save_weights_only=False, mode='min', period=None)
-    callbacks = [es]
+    callbacks = []
     # verbosity
-    verbose_kwargs = {"progress_bar_refresh_rate": 1.0 if verbose else 0.0,
+    verbose_kwargs = {"enable_progress_bar": True if verbose else False,
                       "weights_summary": "top" if verbose else None
                      }
     if not verbose:
         logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
         pl.utilities.distributed.log.setLevel(logging.ERROR)
         
-
-
     #row_log_interval=k
     #log_save_interval=k
-
         
     # create trainer
     trainer = pl.Trainer(
-                        checkpoint_callback=False,
+                        enable_checkpointing=False,
                         callbacks=callbacks,
                         precision=16,
                         max_steps=model_args["max_steps"],
                         gradient_clip_val=model_args["grad_clip_val"],
+                        max_epochs=model_args["max_epochs"],
                         track_grad_norm=-1, # -1 to disable
-                        truncated_bptt_steps=None, # None to disable, 5 was mentioned in docs
-                        logger=logger,
+                        logger=wandb_logger,
                         gpus=1,
-                        val_check_interval=50,#args["val_check_interval"],
+                        #val_check_interval=100,#args["val_check_interval"],
                         auto_lr_find=False,
                         **verbose_kwargs,
                         #overfit_batches=1,
@@ -175,12 +196,15 @@ def create_trainer(model_args, verbose=True):
     return trainer
 
 
-def train_nn(model_type, data_module, model_args, verbose=True):
+def train_nn(args, model_type, data_module, model_args, verbose=True):
     # init model and trainer
     model = create_model(model_type, data_module, model_args)
-    trainer = create_trainer(model_args, verbose=verbose)
+    trainer = create_trainer(args, model_args, verbose=verbose)
+    # track gradients etc
+    trainer.logger.watch(model)
     # do actual training
     trainer.fit(model, data_module)
+    #trainer.logger.unwatch(model)
     # load best checkpoint based on early stopping - not anymore. Disabled because it just slows down training by 5x
     #callbacks = trainer.callbacks
     #mc = [x for x in trainer.callbacks if isinstance(x, ModelCheckpoint)][0]
@@ -194,19 +218,24 @@ def train_nn(model_type, data_module, model_args, verbose=True):
     #    os.unlink(path_to_delete)
     # plot loss curves
     if verbose:
-        #print("Best model path: ", mc.best_model_path)
-        # show loss plot
-        logger = trainer.logger
+        try:
+            #print("Best model path: ", mc.best_model_path)
+            # show loss plot
+            logger = trainer.logger
 
-        metrics_path = f"./mlruns/1/{logger.run_id}/metrics"
-        #with open(os.path.join(metrics_path, "val_loss_step"), "r")
-        train_loss_step = pd.read_csv(os.path.join(metrics_path, "train_loss"), delimiter=" ", header=None, names=["time", "val", "step"])
-        #pd.read_csv(os.path.join(metrics_path, "train_loss_step"), delimiter=" ", header=None, names=["time", "val", "step"])
-        val_loss_epoch = pd.read_csv(os.path.join(metrics_path, "val_loss_epoch"), delimiter=" ", header=None, names=["time", "val", "step"])
-        sns.lineplot(x=val_loss_epoch["step"], y=val_loss_epoch["val"], label="val")
-        sns.lineplot(x=train_loss_step["step"], y=train_loss_step["val"], label="train")
-        plt.ylim(val_loss_epoch["val"].min() * 0.9, val_loss_epoch["val"].max() * 1.1)
-        plt.show()
+            metrics_path = f"./mlruns/1/{logger.run_id}/metrics"
+            #with open(os.path.join(metrics_path, "val_loss_step"), "r")
+            train_loss_step = pd.read_csv(os.path.join(metrics_path, "train_loss"), delimiter=" ", header=None, names=["time", "val", "step"])
+            #pd.read_csv(os.path.join(metrics_path, "train_loss_step"), delimiter=" ", header=None, names=["time", "val", "step"])
+            val_loss_epoch = pd.read_csv(os.path.join(metrics_path, "val_loss_epoch"), delimiter=" ", header=None, names=["time", "val", "step"])
+            sns.lineplot(x=val_loss_epoch["step"], y=val_loss_epoch["val"], label="val")
+            sns.lineplot(x=train_loss_step["step"], y=train_loss_step["val"], label="train")
+            #plt.ylim(val_loss_epoch["val"].min() * 0.9, val_loss_epoch["val"].max() * 1.1)
+            plt.show()
+        except Exception:
+            print("WARNING:", Exception, "happened")
+            pass
+
     return model, trainer
 
 
@@ -222,19 +251,28 @@ def train_classical(model_type, data_module, model_args, verbose=True):
         print("Input, target shape: ", inputs.shape, targets.shape)
     # train
     if model_type == "xgb":
-        from xgboost import XGBRegressor
-        clf = XGBRegressor(n_estimators=model_args["n_estimators"],
+        from xgboost import XGBRegressor, XGBClassifier
+        if data_module.regression:
+            XGBClass = XGBRegressor
+        else:
+            XGBClass = XGBClassifier
+        clf = XGBClass(n_estimators=model_args["n_estimators"],
                            max_depth=model_args["max_depth"],
                            min_child_weight=model_args["min_child_weight"],
                            gamma=model_args["gamma"],
                            subsample=model_args["subsample"],
                            colsample_bytree=model_args["colsample_bytree"],
                            tree_method=model_args["tree_method"],
+                           eval_metric="logloss",
                           )
     #tree_method, set it to hist or gpu_hist
     elif model_type == "rf":
-        from xgboost import XGBRFRegressor
-        clf = XGBRFRegressor(n_estimators=model_args["n_estimators"],
+        from xgboost import XGBRFRegressor, XGBRFClassifier
+        if data_module.regression:
+            XGBClass = XGBRFRegressor
+        else:
+            XGBClass = XGBRFClassifier
+        clf = XGBClass(n_estimators=model_args["n_estimators"],
                              max_depth=model_args["max_depth"],
                              min_child_weight=model_args["min_child_weight"],
                              gamma=model_args["gamma"],
@@ -242,14 +280,19 @@ def train_classical(model_type, data_module, model_args, verbose=True):
                              colsample_bytree=model_args["colsample_bytree"],
                              tree_method=model_args["tree_method"],)
     elif model_type == "linear":
-        from sklearn.linear_model import ElasticNet
-        clf = ElasticNet(alpha=model_args["alpha"], 
-                         l1_ratio=model_args["l1_ratio"])
+        from sklearn.linear_model import ElasticNet, LogisticRegression
+        if data_module.regression:
+             clf = ElasticNet(alpha=model_args["alpha"], 
+                             l1_ratio=model_args["l1_ratio"])
+        else:        
+            clf = LogisticRegression(penalty="elasticnet", solver="saga",
+                                                          C=model_args["alpha"], 
+                                                         l1_ratio=model_args["l1_ratio"])
     clf.fit(inputs, targets)
     return clf, data_module
 
 
-def train_model(model_type, data_modules, model_args, verbose=True):
+def train_model(model_type, data_modules, args, model_args, verbose=True):
     classical_models = ["linear", "xgb", "rf"]
     num_trains = len(data_modules)
     models = []
@@ -258,7 +301,7 @@ def train_model(model_type, data_modules, model_args, verbose=True):
         if model_type in classical_models:
             model, trainer = train_classical(model_type, data_module, model_args, verbose=verbose)
         else:
-            model, trainer = train_nn(model_type, data_module, model_args, verbose=verbose)
+            model, trainer = train_nn(args, model_type, data_module, model_args, verbose=verbose)
         # store model
         models.append(model)
         trainers.append(trainer)

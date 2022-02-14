@@ -15,6 +15,7 @@ import warnings
 if not sys.warnoptions:
     warnings.simplefilter("ignore")
 
+    
 def get_summary(target, pred, args):
     #  rnd_idx = torch.randint(0,len(target) - 10, (1,))
     #print('Random target', target[rnd_idx][0])
@@ -99,6 +100,7 @@ def take_mean_over_steps(timeseries_list, max_timesteps=None):
     if max_timesteps is not None:
         timeseries_list = timeseries_list[:, :max_timesteps]
     return np.nanmean(timeseries_list, axis=0), np.nanstd(timeseries_list, axis=0)
+
 
 def pt_to_df(data, pat_ids, columns, lens):
     data = np.ma.filled(data, fill_value=math.nan)

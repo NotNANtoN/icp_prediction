@@ -38,10 +38,10 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
         if not hasattr(dl.dataset, "was_normed") or dl.dataset.was_normed == False:
             if calc_new_norm_stats:
                 mean, std = model.data_module.get_mean_std(dl)
-                dl.dataset.inputs = [model.data_module.fill(pat, mean, fill_type=dl.fill_type) for pat in dl.dataset.inputs]
+                dl.dataset.inputs = [model.data_module.fill(pat, mean, fill_type=dl.fill_type) for pat in dl.dataset.raw_inputs]
                 dl.dataset.inputs = [(pat - mean) / std for pat in dl.dataset.inputs]
             else:
-                dl.dataset.inputs = [model.data_module.preprocess(pat) for pat in dl.dataset.inputs]
+                dl.dataset.inputs = [model.data_module.preprocess(pat) for pat in dl.dataset.raw_inputs]
             dl.dataset.was_normed = True
     
     # make preds
@@ -87,30 +87,27 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
     return df
 
 
-def make_pred_df_xgb(model, data_module, dl_type="test", dl=None, calc_new_norm_stats=False):
+def make_pred_df_xgb(model, data_module, regression, dl_type="test", dl=None, calc_new_norm_stats=False):
     # get inputs+targets
     if dl is None:
         dl = get_dl(data_module, dl_type)
     else:
-        if calc_new_norm_stats:
-            median = None
-            mean = None
-            std = None
-        else:
-            median = data_module.median
-            mean = data_module.mean
-            std = data_module.std
         dl.dataset.preprocess_all(data_module.fill_type, 
-                                  median=median, 
-                                  mean=mean, 
-                                  std=std)
+                                  median=data_module.medians, 
+                                  mean=data_module.means, 
+                                  std=data_module.stds,
+                                  upper_quants=data_module.upper_quants,
+                                  lower_quants=data_module.lower_quants)
     inputs = dl.dataset.flat_inputs
     targets = dl.dataset.flat_targets
     # get patient ids and steps
     ids = dl.dataset.ids
     steps = dl.dataset.steps
     # predict
-    preds = model.predict(inputs)
+    if regression:
+        preds = model.predict(inputs)
+    else:
+        preds = model.predict_proba(inputs)[:, 1]
     errors = (preds - targets) ** 2
     df = pd.DataFrame({"targets": targets, "preds": preds, "ids": ids, "step": steps, "error": errors})
     df["mean_train_target"] = data_module.mean_train_target
@@ -132,7 +129,7 @@ def hypertension_acc(targets, preds):
     thresh = 22
     hyper_targets = targets > thresh
     hyper_preds = preds > thresh
-    hyper_acc = (hyper_targets == hyper_preds).mean()
+    hyper_acc = (hyper_targets == hyper_preds).astype(float).mean()
     return hyper_acc
 
 
@@ -184,7 +181,7 @@ def print_all_metrics(df):
     print("Mean/Std preds: ", mean_pred, std_pred)
     print("Mean/Std targets: ", mean_target, std_target)
     print("Max error: ", np.max(df_nona["error"]))
-    print("Accuracy for hypertension baseline: ", hypertension_acc(targets, preds))
+    print("Accuracy for hypertension baseline: ", hypertension_acc(targets, np.zeros((len(targets,)))))
     print()
         
     test_target_mse = sklearn.metrics.mean_squared_error(targets, np.ones(len(targets)) * mean_target)
@@ -199,7 +196,7 @@ def print_all_metrics(df):
     print("R2 custom: ", 1 - pred_mse / test_target_mse)
     print("R2: ", df_nona.groupby("model_id").apply(lambda pat: r2_score(pat["targets"], pat["preds"], baseline_target=mean_target)).mean())
     print("R2 old: ", sklearn.metrics.r2_score(targets, preds))
-    print("Accuracy for hypertension: ", df_nona.groupby("model_id").apply(lambda pat: hypertension_acc(pat["targets"], pat["preds"])).mean())
+    print("Accuracy for hypertension: ", hypertension_acc(targets, preds).mean())#.groupby("model_id").apply(lambda pat: hypertension_acc(pat["targets"], pat["preds"])).mean())
     print("Precision for hypertension: ", df_nona.groupby("model_id").apply(lambda pat: hypertension_prec_rec(pat["targets"], pat["preds"])[0]).mean())
     print("Recall for hypertension: ", df_nona.groupby("model_id").apply(lambda pat: hypertension_prec_rec(pat["targets"], pat["preds"])[1]).mean())
     print()
@@ -239,7 +236,7 @@ def print_all_metrics_pat(df):
     print("Mean/Std preds: ", mean_pred, std_pred)
     print("Mean/Std targets: ", mean_target, std_target)
     print("Max error: ", np.max(df.groupby("ids").mean()["error"]))
-    print("Accuracy for hypertension baseline: ", df_nona.groupby("ids").apply(lambda pat: hypertension_acc(pat["targets"], np.ones(len(pat)))).mean())
+    print("Accuracy for hypertension baseline: ", hypertension_acc(df_nona["targets"], np.ones(len(pat))))
     print()
     
     test_target_mse = df.groupby("ids").apply(lambda pat: (pat["targets"] - mean_target).pow(2).mean()).mean()
@@ -279,10 +276,10 @@ def print_all_metrics_pat(df):
 
 
 
-def get_all_dfs(models, trainers, model_type, dl_type="test", dl=None, calc_new_norm_stats=False):
+def get_all_dfs(models, trainers, model_type, regression, dl_type="test", dl=None, calc_new_norm_stats=False):
     classical_models = ["linear", "xgb", "rf"]
     if model_type in classical_models:
-        dfs = [make_pred_df_xgb(model, data_module, dl_type=dl_type, dl=dl, calc_new_norm_stats=calc_new_norm_stats) for model, data_module in zip(models, trainers)]
+        dfs = [make_pred_df_xgb(model, data_module, regression, dl_type=dl_type, dl=dl, calc_new_norm_stats=calc_new_norm_stats) for model, data_module in zip(models, trainers)]
     else:
         dfs = [make_pred_df(model, dl_type=dl_type, dl=dl, calc_new_norm_stats=calc_new_norm_stats) for model in models]
     for i in range(len(dfs)):

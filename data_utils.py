@@ -86,12 +86,12 @@ def make_split(seq_list, test_size=0.2):
 
 def create_dl(ds, bs=32):
     # create dl. shuffle is False because we shuffle in the IterableDataset for train data
-    dl = torch.utils.data.DataLoader(ds, batch_size=bs, shuffle=False, num_workers=0, pin_memory=False, collate_fn=seq_pad_collate)            
+    dl = torch.utils.data.DataLoader(ds, batch_size=bs, shuffle=False, num_workers=16, pin_memory=False, collate_fn=seq_pad_collate, persistent_workers=1)            
     return dl
 
 
 def to_torch(seq_list):
-    return [torch.from_numpy(seq.to_numpy()).clone() for seq in seq_list]
+    return [torch.from_numpy(seq.to_numpy()).clone().float() for seq in seq_list]
 
 
 def seq_pad_collate(batch):
@@ -165,14 +165,18 @@ def ema_fill_mask(pat: np.ndarray, ema_val: float, mean: np.ndarray):
 
 
 class SeqDataModule(pytorch_lightning.LightningDataModule):
-    def __init__(self, train_data, val_data, test_data, dbs,
-                 batch_size: int = 32, random_starts=False, min_len=10, train_noise_std=0.0, 
-                 fill_type="pat_ema", flat_block_size=0
+    def __init__(self, df, db_name,
+                 batch_size: int = 32, random_starts=False, 
+                 min_len=10, train_noise_std=0.0, 
+                 fill_type="pat_ema", flat_block_size=0, 
+                 target_name = "ICP_Vital", target_nan_quantile=0,
+                 block_size=0,
+                 max_len=0,
                 ):
         super().__init__()
+        
         # dataset choice
-        self.target_name = "ICP_Vital" 
-        self.dbs = dbs
+        self.target_name = target_name
         # hyperparams
         self.random_starts = random_starts
         self.train_noise_std = train_noise_std
@@ -180,45 +184,103 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
         self.batch_size = batch_size
         self.fill_type = fill_type
         self.flat_block_size = flat_block_size
+        self.target_nan_quantile = target_nan_quantile
+        self.block_size = block_size
+        self.max_len = max_len
+        
+        # construct targets and drop respective columns
+        diagnose_cols = [col for col in df.columns if "diagnose" in col.lower()]
+        if target_name == "ICP_Vital":
+            self.regression = True
+            self.classification = False
+            # remove CPP as it is dependent on ICP and we want to predict ICP
+            icp_cols = [col for col in df.columns if "ICP" in col]
+            cpp_cols = [col for col in df.columns if "CPP" in col]
+            drop_cols = icp_cols + cpp_cols + diagnose_cols 
+            df["target"] = df[target_name]
+            df = df.drop(columns=drop_cols)
+        elif target_name.startswith("long_icp_hypertension"):
+            self.regression = False
+            self.classification = True
+            hyper_thresh = 22.0 # value above which ICP val is considered critical
+            hours_thresh = 2 # number of hours to be above to be considered a long phase
+            hours_forecasted = int(target_name.split("_")[-1])  # e.g. "long_icp_hypertension_2"
 
+            def add_hypertension_target(seq, hyper_thresh, hours_thresh, hours_forecasted):
+                seq = seq.sort_values("rel_time", ascending=True)
+                targets = []
+                tension_count = 0
+                for icp_val in seq["ICP_Vital_max"].iloc[hours_forecasted:]:
+                    if icp_val > hyper_thresh:
+                        tension_count += 1
+                    else:
+                        tension_count = 0
+                    target = float(tension_count > hours_thresh)
+                    targets.append(target)
+                targets.extend([np.nan] * min(hours_forecasted, len(seq)))
+                return pd.Series(targets)
+
+            targets = df.groupby("Pat_ID").apply(lambda pat: 
+                                                 add_hypertension_target(pat, hyper_thresh, hours_thresh, hours_forecasted))
+            # assign to column
+            df["target"] = list(targets)
+            # drop columns
+            drop_cols = diagnose_cols 
+            df = df.drop(columns=drop_cols)
+        
+        
+        # apply splits
+        self.df = df
+        train_data = df[df["split"] == "train"].drop(columns=["split"])
+        val_data = df[df["split"] == "val"].drop(columns=["split"])
+        test_data = df[df["split"] == "test"].drop(columns=["split"])
+        
+        non_input_cols = ["Pat_ID", "target"]
+        input_cols = [col for col in train_data.columns if col not in non_input_cols]
+        
+        # clamp extremas according to pre-calculated vals and store them
+        # calc quantiles according to train data
+        self.upper_quants = torch.tensor(train_data[input_cols].quantile(0.9999))
+        self.lower_quants = torch.tensor(train_data[input_cols].quantile(1 - 0.9999))
+
+        # calc mean, median, std
+        self.means, self.medians, self.stds = train_data[input_cols].mean(), train_data[input_cols].median(), train_data[input_cols].std()
+        self.means, self.medians, self.stds = (torch.tensor(x).float() for x in (self.means, self.medians, self.stds))
+        self.mean_train_target = train_data["target"].mean()
+        self.mean_train_target_pat = train_data.groupby("Pat_ID").apply(lambda pat: pat["target"].mean()).mean()
         
         # create datasets
-        self.train_ds = SequenceDataset(train_data, self.target_name, train=True, random_starts=self.random_starts, block_size=0, 
-                         min_len=self.min_len, train_noise_std=self.train_noise_std, dbs=self.dbs, flat_block_size=self.flat_block_size) if train_data is not None else None
-        self.val_ds = SequenceDataset(val_data, self.target_name, train=False, random_starts=False, block_size=0, 
-                         train_noise_std=0.0, dbs=self.dbs, flat_block_size=self.flat_block_size) if val_data is not None else None
-        self.test_ds = SequenceDataset(test_data, self.target_name, train=False, random_starts=False, block_size=0, 
-                         train_noise_std=0.0, dbs=self.dbs, flat_block_size=self.flat_block_size) if test_data is not None else None
+        self.train_ds = SequenceDataset(train_data, self.target_name, train=True,
+                                        random_starts=self.random_starts,
+                                        block_size=self.block_size,
+                                        min_len=self.min_len, 
+                                        max_len=self.max_len,
+                                        train_noise_std=self.train_noise_std,
+                                        flat_block_size=self.flat_block_size,
+                                        target_nan_quantile=self.target_nan_quantile) if train_data is not None else None
+        self.val_ds = SequenceDataset(val_data, self.target_name, train=False, random_starts=False, block_size=self.block_size, 
+                         train_noise_std=0.0, flat_block_size=self.flat_block_size,
+                                     max_len=self.max_len,) if val_data is not None else None
+        self.test_ds = SequenceDataset(test_data, self.target_name, train=False, random_starts=False, block_size=self.block_size, 
+                         train_noise_std=0.0, flat_block_size=self.flat_block_size,
+                                      max_len=self.max_len,) if test_data is not None else None
         self.datasets = [ds for ds in [self.train_ds, self.val_ds, self.test_ds] if ds is not None]
         
         self.feature_names = self.train_ds.feature_names
         self.setup_completed = False
+         
+            
+        #self.initial_setup()
         
-        self.initial_setup()
+    def setup(self, stage: Optional[str] = None): 
+        # this method should only be called shortly before training
         
-    def initial_setup(self, stage: Optional[str] = None):    
         if not self.setup_completed:
             # (yeo not implemented as on UMAP it just looks worse than not using it)
             # potentially get yeo-john lambdas from train dataset
             # potentially apply lambdas to all datasets
-            
-            # first do for train_ds to get all statistics
-            train_ds = self.train_ds
-            self.median, self.mean, self.std = train_ds.preprocess_all(fill_type=self.fill_type)
-            # then for all other datasets
-            eval_datasets = [ds for ds in [self.val_ds, self.test_ds] if ds is not None]
-            for ds in eval_datasets:
-                ds.preprocess_all(fill_type=self.fill_type, median=self.median, mean=self.mean, std=self.std)
-                
-            # calc mean train target for later evaluation
-            self.mean_train_target_pat = np.array([pat[~torch.isnan(pat)].numpy().mean() 
-                                                     for pat in self.train_ds.targets
-                                                    ]).mean()
-            
-            self.mean_train_target = np.concatenate([pat[~torch.isnan(pat)].numpy()
-                                                     for pat in self.train_ds.targets
-                                                    ]).mean()
-                
+            for ds in self.datasets:
+                ds.preprocess_all(fill_type=self.fill_type, median=self.medians, mean=self.means, std=self.stds, lower_quants=self.lower_quants, upper_quants=self.upper_quants)
             # done
             self.setup_completed = True
             
@@ -236,139 +298,125 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
 
     def train_dataloader(self):
         return create_dl(self.train_ds, bs=self.batch_size) if self.train_ds is not None else None
-        #return self.train_dl
 
     def val_dataloader(self):
-        return create_dl(self.val_ds, bs=self.batch_size * 4) if self.val_ds is not None else None
-        #return self.val_dl
+        return create_dl(self.val_ds, bs=self.batch_size) if self.val_ds is not None else None
 
     def test_dataloader(self):
-        return create_dl(self.test_ds, bs=self.batch_size * 4) if self.test_ds is not None else None
-        #return self.test_dl
-
-    def teardown(self, stage: Optional[str] = None):
-        # Used to clean-up when the run is finished
-        pass
+        return create_dl(self.test_ds, bs=self.batch_size) if self.test_ds is not None else None
     
+    def preprocess(self, pat):
+        return self.train_ds.preprocess(pat, self.fill_type, median=self.medians, mean=self.means, std=self.stds, lower_quants=self.lower_quants, upper_quants=self.upper_quants)
 
-class SequenceDataset(torch.utils.data.IterableDataset):
-    def __init__(self, data, target_name, train, random_starts=1, block_size=0, min_len=10, train_noise_std=0.1, dbs="all", flat_block_size=0):
+        
+class SequenceDataset(torch.utils.data.Dataset):
+    def __init__(self, data, target_name, train, random_starts=1, block_size=0, min_len=10, train_noise_std=0.1, dbs="all", flat_block_size=0, target_nan_quantile=0, max_len=0):
         self.random_starts = random_starts
         self.min_len = min_len
+        self.max_len = max_len
         self.block_size = block_size
         self.train_noise_std = train_noise_std
         self.train = train
         self.flat_block_size = flat_block_size
+        self.target_nan_quantile = target_nan_quantile
+        
+        if target_nan_quantile > 0:
+            data = data.copy()
+            low_quant = data["target"].quantile(1 - target_nan_quantile)
+            high_quant = data["target"].quantile(target_nan_quantile)
+            data.loc[data["target"] > high_quant, "target"] = np.nan
+            data.loc[data["target"] < low_quant, "target"] = np.nan
         
         # copy each sequence to not modify it outside of here
-        data = [seq.copy() for seq in data]
+        data = [data[data["Pat_ID"] == pat_id].drop(columns=["Pat_ID"]) for pat_id in data["Pat_ID"].unique()]
+        self.raw_inputs = to_torch([p.drop(columns=["target"]) for p in data])
+        self.targets = to_torch([p["target"] for p in data])
         
-        # determine DB, then drop the features for it
-        # select rows of given databases
-        all_dbs = ["DB_MIMIC", "DB_eICU", "DB_UKE"]
-        db_list = all_dbs if dbs == "all" else ["DB_" + db for db in dbs]
-        data = [seq for seq in data if seq[db_list].iloc[0].sum() == 1]
-        # drop db features
-        db_cols = [c for c in data[0].columns if "DB_" in c]
-        data = [seq.drop(columns=db_cols) for seq in data]
-
-        inputs = [seq.drop(columns=[target_name]) for seq in data]
-        self.feature_names = list(inputs[0].columns)
-        self.raw_inputs = to_torch(inputs)
-        self.targets = to_torch([seq[target_name] for seq in data])
+        self.feature_names = list(data[0].drop(columns=["target"]).columns)
         
-        self.ids = np.concatenate([[i] * len(inputs[i]) for i in range(len(inputs))])
-        self.steps = np.concatenate([np.arange(len(inputs[i])) for i in range(len(inputs))])
+        lens = [len(pat) for pat in self.raw_inputs]
+        self.ids = np.concatenate([[i] * lens[i] for i in range(len(lens))])
+        self.steps = np.concatenate([np.arange(lens[i]) for i in range(len(lens))])
         
         self.all_preprocessed = False
-        
-    def __iter__(self):
-        if self.train:
-            # train sets
-            while True:
-                idx = random.randint(0, len(self.targets) - 1)
-                yield self[idx]
-        else:   
-            start = 0
-            end = len(self.targets)
 
-            worker_info = torch.utils.data.get_worker_info()
-            if worker_info is None:  # single-process data loading, return the full iterator
-                iter_start = start
-                iter_end = end
-            else:  # in a worker process
-                 # split workload
-                per_worker = int(math.ceil((end - start) / float(worker_info.num_workers)))
-                worker_id = worker_info.id
-                iter_start = start + worker_id * per_worker
-                iter_end = min(iter_start + per_worker, end)
-        
-            # validation and test sets
-            for idx in range(iter_start, iter_end):
-                yield self[idx]
-                
-
-    #def __len__(self):
-    #    return len(self.targets)
+    def __len__(self):
+        return len(self.targets)
 
     def __getitem__(self, index):
         x = self.inputs[index]
         y = self.targets[index]
         seq_len = len(x)
         
-        if self.random_starts:
+        
+        if self.block_size:
+            total_len = self.block_size
+            if self.train:
+                start_idx = random.randint(0, seq_len - total_len) if seq_len > total_len else 0
+            else:
+                start_idx = 0
+            end_idx = start_idx + total_len
+            x = x[start_idx: end_idx]
+            y = y[start_idx: end_idx]
+            if len(x) < self.block_size:
+                x_padding = torch.zeros(size=(self.block_size - len(x), x.shape[1]), dtype=x.dtype)
+                x = torch.cat((x, x_padding))
+                y_padding = torch.zeros(size=(self.block_size - len(y),), dtype=y.dtype) * np.nan
+                y = torch.cat((y, y_padding))
+            #y = y[-1]
+            #y = y.unsqueeze(0)
+            seq_len = end_idx - start_idx
+        elif self.random_starts:
             start_idx = random.randint(0, max(seq_len - self.min_len, 0))
             if start_idx > 0:
                 x = x[start_idx:]
                 y = y[start_idx:]
-        elif self.block_size:
-            total_len =  self.block_size
-            start_idx = random.randint(0, seq_len - total_len) if seq_len > total_len else 0
-            end_idx = start_idx + total_len
-            x = x[start_idx:end_idx]
-            y = y[start_idx:end_idx]
-            if len(x) < self.block_size:
-                padding = torch.zeros(size=(self.block_size - seq_len, x.shape[1]), dtype=x.dtype)
-                x = torch.cat((padding, x))
-            y = y[-1]
-            y = y.unsqueeze(0)
-            seq_len = end_idx - start_idx
         else:
             start_idx = 0
             
+        if self.max_len > 0:
+            x = x[: self.max_len]
+            y = y[: self.max_len]
+        
         # augment data
         if self.train_noise_std:
             x = torch.normal(x, self.train_noise_std)
             
         return x.float(), y.float()
+    
+    def clip_pat(self, pat, lower_quants, upper_quants):
+        return pat.clip(lower_quants, upper_quants)
+    
+    def clip(self, lower_quants, upper_quants):
+        self.inputs = [self.clip_pat(pat, lower_quants, upper_quants) for pat in self.raw_inputs]
 
-    def preprocess_all(self, fill_type, median=None, mean=None, std=None):
+    def preprocess_all(self, fill_type, median=None, mean=None, std=None, upper_quants=None, lower_quants=None):
         if self.all_preprocessed:
             return
         
-        # 1. get median for train dataset for filling and store
-        if median is None:
-            median = self.get_input_median()
+        # apply clipping
+        self.clip(lower_quants, upper_quants)
 
-        # 2. apply filling with median from train
+        # 1. apply filling 
         self.fill(median, fill_type)
 
-        # 3. get mean and std for train dataset
-        if mean is None:
-            mean, std = self.get_mean_std()
-
-        # 4. apply standardization 
+        # 2. apply normalization 
         self.norm(mean, std)
 
-        # 5. make flat inputs for classical ML models after having preprocessed the data
+        # 3. make flat inputs for classical ML models after having preprocessed the data
         self.make_flat_arrays()
         
         self.all_preprocessed = True
         self.mean = mean
         self.median = median
         self.std = std
-
-        return median, mean, std
+        
+    def preprocess(self, pat, fill_type, median=None, mean=None, std=None,
+                   lower_quants=None, upper_quants=None):
+        pat = self.clip_pat(pat, lower_quants, upper_quants)
+        pat = self.fill_pat(pat, median, fill_type)
+        pat = self.norm_pat(pat, mean, std)
+        return pat
     
     def get_input_median(self):
         median = self.get_agg_statistic(self.raw_inputs, lambda pat: np.ma.median(pat, axis=0), agg="median")
@@ -376,14 +424,17 @@ class SequenceDataset(torch.utils.data.IterableDataset):
     
     def fill(self, 
              median: torch.Tensor,
-             fill_type: str="pat_mean", # pat_mean, mean, pat_ema, pat_ema_mask
+             fill_type: str="pat_mean", # pat_mean, mean, pat_ema, pat_ema_mask, none
             ):
         """Fill the NaN by using the mean of the values so far or just the overall train data mean for a single patient"""
-        self.inputs = [self.fill_pat(pat, median, fill_type) for pat in self.raw_inputs]
+        self.inputs = [self.fill_pat(pat, median, fill_type) for pat in self.inputs]
         
     def fill_pat(self, pat, median, fill_type):
-        pat = pat.numpy()
-        median = median.numpy()
+        if fill_type == "none":
+            return pat
+        
+        pat = pat.numpy().astype(np.float32)
+        median = median.numpy().astype(np.float32)
         
         nan_mask = np.isnan(pat)
         if fill_type == "pat_median":
@@ -428,6 +479,9 @@ class SequenceDataset(torch.utils.data.IterableDataset):
     
     def norm(self, mean, std):
         self.inputs = [(pat - mean) / std for pat in self.inputs]
+        
+    def norm_pat(self, pat, mean, std):
+        return (pat - mean) / std
         
     def make_flat_arrays(self, flat_block_size=None):
         if flat_block_size is None:
