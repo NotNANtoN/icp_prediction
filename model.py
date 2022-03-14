@@ -12,35 +12,45 @@ from x_transformers.x_transformers import AttentionLayers
 
 
 class LitSeqModel(pl.LightningModule):
-    def __init__(self, data_module, max_epochs=5, weight_decay=0.1, use_macro_loss=True, use_pos_weight=True, use_nan_embed=False, lr=0.001):
+    def __init__(self, data_module, max_epochs=5, weight_decay=0.1, use_macro_loss=True, 
+                 use_pos_weight=True, use_nan_embed=False, lr=0.001, use_huber=False,
+                 use_static=True):
         super().__init__()        
         self.data_module = data_module
         self.regression = data_module.regression
         self.use_macro_loss = use_macro_loss
         self.use_nan_embed = use_nan_embed
         self.lr = lr
+        self.use_huber = use_huber
+        self.use_static = use_static
         
         # get feature names
         feature_names = self.data_module.feature_names
         
-        # save idcs of static idcs to have separate streams in model
-        static_names = ['Geschlecht', 'Alter', 'Größe', 'Gewicht']
-        static_idcs = [i for i, name in enumerate(feature_names)
-                       if name in static_names
-                       or name.startswith("Diagnose")
-                       or name.startswith("DB_")]
-        non_static_idcs = [i for i in range(len(feature_names)) if i not in static_idcs]
-        self.register_buffer("static_idcs", torch.tensor(static_idcs))
-        self.register_buffer("recurrent_idcs", torch.tensor(non_static_idcs))
-        self.num_recurrent_inputs = len(self.recurrent_idcs)
-        self.num_static_inputs = len(self.static_idcs)
+        if use_static:
+            # save idcs of static idcs to have separate streams in model
+            static_names = ['Geschlecht', 'Alter', 'Größe', 'Gewicht']
+            static_idcs = [i for i, name in enumerate(feature_names)
+                        if name in static_names
+                        or name.startswith("Diagnose")
+                        or name.startswith("DB_")]
+            non_static_idcs = [i for i in range(len(feature_names)) if i not in static_idcs]
+            self.register_buffer("static_idcs", torch.tensor(static_idcs))
+            self.register_buffer("recurrent_idcs", torch.tensor(non_static_idcs))
+            self.num_recurrent_inputs = len(self.recurrent_idcs)
+            self.num_static_inputs = len(self.static_idcs)
+        else:
+            self.num_recurrent_inputs = len(feature_names)
+            self.num_static_inputs = 0
+            self.static_idcs = None
+            self.recurrent_idcs = list(range(len(feature_names)))
         self.num_inputs = len(feature_names)
         
         # define loss 
         targets = torch.cat(data_module.train_ds.targets)
         pos_frac = targets[~torch.isnan(targets)].mean()
         self.pos_weight = (1 - pos_frac) / pos_frac if use_pos_weight else None
-        self.loss_func = SequentialLoss(self.regression, self.use_macro_loss, self.pos_weight)
+        self.loss_func = SequentialLoss(self.regression, self.use_macro_loss, self.pos_weight, self.use_huber)
         
         if self.use_nan_embed:
             from nan_emb import NanEmbed
@@ -90,15 +100,23 @@ class LitSeqModel(pl.LightningModule):
     
     def validation_epoch_end(self, val_step_output_list):
         # calculate f1_score, accuracy etc
-        preds = torch.cat([step_out[0].flatten() for step_out in val_step_output_list]).cpu().squeeze().numpy()#.reshape(-1)
-        targets = torch.cat([step_out[1].flatten() for step_out in val_step_output_list]).cpu().squeeze().numpy()#.reshape(-1)
+        preds = torch.cat([step_out[0].flatten() for step_out in val_step_output_list]).cpu().squeeze().float().numpy()
+        targets = torch.cat([step_out[1].flatten() for step_out in val_step_output_list]).cpu().squeeze().float().numpy()
         # remove NaNs
         mask = ~np.isnan(targets)
         preds = preds[mask]
         targets = targets[mask]
         
         if self.regression:
-            r2 = sklearn.metrics.r2_score(targets, preds)
+            try:
+                r2 = sklearn.metrics.r2_score(targets, preds)
+            except ValueError:
+                print("ValueError: r2_score")
+                print(targets.shape, preds.shape)
+                print(np.isinf(targets).sum(), np.isinf(preds).sum())
+                print(np.isnan(targets).sum(), np.isnan(preds).sum())
+                print(targets, preds)
+                quit()
             mse = sklearn.metrics.mean_squared_error(targets, preds)
             rmse = np.sqrt(mse)
             mae = sklearn.metrics.mean_absolute_error(targets, preds)
@@ -223,38 +241,64 @@ class LitCLIP(LitSeqModel):
         
         
 def load_gpt_model(name):
-    from transformers import GPTNeoForCausalLM, GPT2Tokenizer
     device = torch.device("cpu")
     if name == "neo1.3":
+        from transformers import GPTNeoForCausalLM, GPT2Tokenizer
         gpt_tokenizer = GPT2Tokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B")
         gpt_model = GPTNeoForCausalLM.from_pretrained("EleutherAI/gpt-neo-1.3B", pad_token_id=gpt_tokenizer.eos_token_id)
     elif name == "neo2.7":
+        from transformers import GPTNeoForCausalLM, GPT2Tokenizer
         gpt_tokenizer = GPT2Tokenizer.from_pretrained("EleutherAI/gpt-neo-2.7B")
         gpt_model = GPTNeoForCausalLM.from_pretrained("EleutherAI/gpt-neo-2.7B", pad_token_id=gpt_tokenizer.eos_token_id)
     elif name == "gpt2":
-        from transformers import GPT2LMHeadModel
+        from transformers import GPT2LMHeadModel, GPT2Tokenizer
         gpt_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        gpt_model = GPT2LMHeadModel.from_pretrained('gpt2', pad_token_id=gpt_tokenizer.eos_token_id)
+        gpt_model = GPT2LMHeadModel.from_pretrained('gpt2', pad_token_id=gpt_tokenizer.eos_token_id)        
     gpt_model = gpt_model.to(device)
     return gpt_model, gpt_tokenizer
+
+
+def apply_train_mode_gpt(mode, model):
+    # freeze certain layers
+    if mode == "freeze":
+        for p in model.parameters():
+            p.requires_grad = False
+    elif mode == "train_norm":
+        for n, p in model.named_parameters():
+            p.requires_grad = "ln_" in n
+    elif mode == "full":
+        for p in model.parameters():
+            p.requires_grad = True
+    elif mode == "train_mlp_norm":
+        for n, p in model.named_parameters():
+            p.requires_grad = "ln_" in n or "mlp" in n
+    elif mode == "adapters":
+        for n, p in model.named_parameters():
+            p.requires_grad = "adapter" in n or "ln_" in n
+        #    if p.requires_grad:
+        #        print(n)
+        #    #p.requires_grad = "ln_" in n or "mlp" in n
 
         
 class LitGPT(LitSeqModel):
     def __init__(self, *args, 
                  gpt_name="gpt2",
+                 mode="train_mlp_norm",
                  **kwargs):
         super().__init__(*args, **kwargs)
-        
         self.gpt_name = gpt_name
-        
+        # load model
         self.model, self.tokenizer = load_gpt_model(gpt_name)
-  
+        if mode == "adapters":
+            self.model.add_adapter("icp", config=None, overwrite_ok = False, set_active=True)
+        # freeze some params
+        apply_train_mode_gpt(mode, self.model)
+        # get width
         self.width = self.model.transformer.wte.weight.shape[1]
-
+        # create input and output layers
         self.input_mapping = torch.nn.Linear(self.num_recurrent_inputs + self.num_static_inputs, self.width)
         self.out_mapping = torch.nn.Linear(self.width, 1)
-
-
+        # replace output layer by our newly initialized one
         #model.model.transformer.wte = in_mapping
         self.model.lm_head = self.out_mapping
         
@@ -263,13 +307,14 @@ class LitGPT(LitSeqModel):
         x = self.input_mapping(x)
         x = self.model(inputs_embeds=x)["logits"]
         return x
-        
 
         
 class LitMLP(LitSeqModel):
     def __init__(self, 
                  data_module, 
-                 hidden_size=256, dropout_val=0.2, **kwargs):
+                 hidden_size=256, 
+                 dropout_val=0.2, 
+                 **kwargs):
         super().__init__(data_module, **kwargs)
         self.save_hyperparameters()    
             
@@ -526,14 +571,17 @@ class PositionalEncoding(torch.nn.Module):
 
 
 class SequentialLoss(torch.nn.Module):#jit.ScriptModule):
-    def __init__(self, regression, use_macro_loss, pos_weight):
+    def __init__(self, regression, use_macro_loss, pos_weight, use_huber):
         super().__init__()
         self.regression = regression
         self.use_macro_loss = use_macro_loss
         self.pos_weight = pos_weight
         
         if regression:
-            self.loss_func = torch.nn.MSELoss(reduction='mean')
+            if use_huber:
+                self.loss_func = torch.nn.SmoothL1Loss(reduction='mean')
+            else:
+                self.loss_func = torch.nn.MSELoss(reduction='mean')
         else:
             self.loss_func = torch.nn.BCEWithLogitsLoss(reduction='mean', pos_weight=pos_weight)
 

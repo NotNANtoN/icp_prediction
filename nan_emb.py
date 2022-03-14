@@ -13,7 +13,7 @@ class ContinuousEmbedding(torch.nn.Module):
             mask[i, i * out_size: i * out_size + out_size] = False
         self.register_buffer("mask", mask)
         
-        self.weights = torch.nn.Parameter(torch.zeros(in_size, in_size * out_size).normal_(0.01))
+        self.weights = torch.nn.Parameter(torch.zeros(in_size, in_size * out_size).normal_(0, 0.1))
         with torch.no_grad():
             self.weights[mask] = 0
         self.bias = torch.nn.Parameter(torch.rand(in_size * out_size))
@@ -25,7 +25,7 @@ class ContinuousEmbedding(torch.nn.Module):
 
 
 class NanEmbed(torch.nn.Module):
-    def __init__(self, in_size, out_size, use_conv=True):
+    def __init__(self, in_size, out_size):
         super().__init__()
         self.in_size = in_size
         self.out_size = out_size
@@ -40,13 +40,11 @@ class NanEmbed(torch.nn.Module):
         out = self.cont_emb(x)
         # shape [batch size, in_size, out_size]
         # fill embedding with 0 where we had a NaN before
-        #repeated_mask = mask.unsqueeze(-1).repeat(1, 1, self.out_size)
         with torch.no_grad():
             out[mask] = 0
         # average the embedding
         emb = out.mean(dim=1) 
         return emb
-
 
 
 class NanEmbedWeird(torch.nn.Module):

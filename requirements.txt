@@ -1,3 +1,5 @@
+tensorflow # for adapter-transformers, for some reason it is imported there
+
 # Dev Dependencies
 captum>=0.2.0
 datashader>=0.11.0

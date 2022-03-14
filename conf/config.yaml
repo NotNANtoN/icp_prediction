@@ -1,0 +1,67 @@
+# Most important settings:
+model_type: "mlp"
+target_name: "ICP_Vital"   # ICP_Vital" , long_icp_hypertension_2, 
+db_name: "UKE"  # "UKE", "MIMIC"
+minutes: 60
+
+# data args
+seed: 2
+#norm_method:  # z, or none
+features:
+fill_type: "median" # "pat_mean", "median", "pat_ema" "pat_ema_mask"
+target_nan_quantile: 0.9999
+# do not tune
+#k_fold: 0
+#num_splits: 3
+block_size: 0
+random_starts: True
+
+# augmentations
+train_noise_std: 0.01
+bs: 8 # 8 best for rnn
+min_len: 20
+max_len: 128
+
+# training args
+max_epochs: 20
+lr: #0.0001
+use_nan_embed: False
+weight_decay: 0.2
+grad_clip_val: 1.0
+# do not change
+val_check_interval:  # check validation performance every N steps
+max_steps: -1
+use_macro_loss: False
+use_pos_weight: True
+use_huber: False
+# model args
+# rnn + mlp params
+dropout: 0.1
+hidden_size: 2048
+use_static: False
+# rnn params
+rnn_layers: 1
+rnn_type: "gru"
+# transformer params
+mode: "train_mlp_norm"  # "train_mlp_norm",  "train_norm", "freeze" (does not train)
+# clip params
+clip_name: "ViT-B/16"
+# gpt params
+gpt_name: "gpt2"  # gpt2, neo1.3, neo2.7
+# classical model args
+flat_block_size: 8
+#linear
+alpha: 1
+l1_ratio: 0.5
+# xgb+rf
+n_estimators: 50
+max_depth: 6 
+min_child_weight: # 1-inf
+gamma: 0.0 # 0-inf
+subsample: 1.0 # 0.0-1.0
+colsample_bytree: 1.0 # 0.-1.0
+tree_method: "gpu_hist" # hist, gpu_hist
+
+gpu: 0
+opt_steps: 100
+tune_hebo: True

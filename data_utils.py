@@ -190,9 +190,19 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
         
         # construct targets and drop respective columns
         diagnose_cols = [col for col in df.columns if "diagnose" in col.lower()]
-        if target_name == "ICP_Vital":
+        
+        
+        #if target_name in ["VS", "CI"]:
+        #    label_df = pd.read_csv("data/sah_labels.csv").drop_duplicates("Patienten ID")
+        # SAH needs to be done in preprocesing notebook because it happens at one specific time.    
+            
+            
+        if target_name in diagnose_cols:
+            self.regression = False
+            df["target"] = df[target_name]
+            df = df.drop(columns=diagnose_cols)
+        elif target_name == "ICP_Vital":
             self.regression = True
-            self.classification = False
             # remove CPP as it is dependent on ICP and we want to predict ICP
             icp_cols = [col for col in df.columns if "ICP" in col]
             cpp_cols = [col for col in df.columns if "CPP" in col]
@@ -201,7 +211,6 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
             df = df.drop(columns=drop_cols)
         elif target_name.startswith("long_icp_hypertension"):
             self.regression = False
-            self.classification = True
             hyper_thresh = 22.0 # value above which ICP val is considered critical
             hours_thresh = 2 # number of hours to be above to be considered a long phase
             hours_forecasted = int(target_name.split("_")[-1])  # e.g. "long_icp_hypertension_2"
@@ -227,6 +236,13 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
             # drop columns
             drop_cols = diagnose_cols 
             df = df.drop(columns=drop_cols)
+        elif target_name in df.columns:
+            if target_name == "Geschlecht":
+                self.regression = False
+            else:
+                self.regression = True
+            df["target"] = df[target_name]
+            df = df.drop(columns=[target_name])
         
         
         # apply splits
@@ -348,7 +364,6 @@ class SequenceDataset(torch.utils.data.Dataset):
         y = self.targets[index]
         seq_len = len(x)
         
-        
         if self.block_size:
             total_len = self.block_size
             if self.train:
@@ -424,7 +439,7 @@ class SequenceDataset(torch.utils.data.Dataset):
     
     def fill(self, 
              median: torch.Tensor,
-             fill_type: str="pat_mean", # pat_mean, mean, pat_ema, pat_ema_mask, none
+             fill_type: str="pat_median", # pat_mean, mean, pat_ema, pat_ema_mask, none
             ):
         """Fill the NaN by using the mean of the values so far or just the overall train data mean for a single patient"""
         self.inputs = [self.fill_pat(pat, median, fill_type) for pat in self.inputs]
@@ -438,10 +453,11 @@ class SequenceDataset(torch.utils.data.Dataset):
         
         nan_mask = np.isnan(pat)
         if fill_type == "pat_median":
-            count = (~nan_mask).cumsum(axis=0)
+            count = (~nan_mask).cumsum(axis=0) + 1
             # calc cumsum without nans
             median_filled = pat.copy()
-            median_filled[nan_mask] = median[nan_mask]
+            median_filled[nan_mask] = np.expand_dims(median, 0).repeat(pat.shape[0], axis=0)[nan_mask]
+            #median.repeat(pat.shape[0], 1)[nan_mask]
             cumsum = median_filled.cumsum(axis=0)
             # calc mean until step:
             mean_until_step = cumsum / count
@@ -453,6 +469,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         elif fill_type == "pat_ema_mask":
             ema_val = 0.3
             pat = ema_fill_mask(pat, ema_val, median)
+    
 
         pat = torch.from_numpy(pat)
         median = torch.from_numpy(median)

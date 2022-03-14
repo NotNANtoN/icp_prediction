@@ -1,3 +1,9 @@
+.vscode/
+backuptune.py
+hebo_tunings/
+ids.csv
+temp_script.py
+tunings/
 wandb/
 data
 debug_plots/
