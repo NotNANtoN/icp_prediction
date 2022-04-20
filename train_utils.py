@@ -8,10 +8,10 @@ import pandas as pd
 from model import LitRNN, LitTransformer, LitMLP, LucidTransformer, LitCLIP, LitGPT
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
+#from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 import wandb
 
-from data_utils import make_split, do_fold
+from data_utils import do_fold
 
 
 def retrain(dev_data, test_data, best_params, cfg, verbose=True):
@@ -46,13 +46,13 @@ def retrain(dev_data, test_data, best_params, cfg, verbose=True):
 
 
 # define model
-def create_model(model_type, feature_names, cfg):
+def create_model(model_type, data_module, cfg):
     general_keys = ["weight_decay", "max_epochs", "use_macro_loss",
                     "use_pos_weight", "use_nan_embed", "lr", "use_huber",
-                    "use_static"]
+                    "use_static", "freeze_nan_embed", "norm_nan_embed", "nan_embed_size"]
     general_kwargs = {key: cfg[key] for key in general_keys}
     if model_type == "rnn":
-        model = LitRNN(feature_names, 
+        model = LitRNN(data_module, 
                        hidden_size=cfg["hidden_size"], 
                        dropout_val=cfg["dropout"], 
                        rnn_layers=cfg["rnn_layers"], 
@@ -61,7 +61,7 @@ def create_model(model_type, feature_names, cfg):
                         )
     elif model_type == "transformer" or model_type == "lucid_transformer":
         model_class = LitTransformer if model_type == "transformer" else LucidTransformer
-        model = model_class(feature_names,
+        model = model_class(data_module,
                                ninp=cfg["emb_dim"], # embedding dimension
                                nhead=cfg["n_heads"], # 2, # num attention heads
                                nhid=cfg["hidden_size"], #the dimension of the feedforward network model in nn.TransformerEncoder
@@ -70,18 +70,19 @@ def create_model(model_type, feature_names, cfg):
                                 **general_kwargs
                                )
     elif model_type  == "mlp":
-        model = LitMLP(feature_names, 
+        model = LitMLP(data_module, 
                        hidden_size=cfg["hidden_size"], 
                        dropout_val=cfg["dropout"], 
                        **general_kwargs)
     elif model_type == "clip":
-        model = LitCLIP(feature_names,
+        model = LitCLIP(data_module,
                         clip_name=cfg["clip_name"],
                         **general_kwargs)
     elif model_type == "gpt":
-        model = LitGPT(feature_names,
+        model = LitGPT(data_module,
                        gpt_name=cfg["gpt_name"],
                        mode=cfg["mode"],
+                       pretrained=cfg["pretrained"],
                        **general_kwargs)
     else:
         raise ValueError("Unknown model_type: " + str(model_type))
@@ -91,7 +92,7 @@ def create_model(model_type, feature_names, cfg):
     return model
 
 
-def create_trainer(cfg, verbose=True):
+def create_trainer(cfg, verbose=True, log=True):
     # default logger used by trainer
     #logger = None
     #logger = pl.loggers.mlflow.MLFlowLogger(
@@ -100,16 +101,21 @@ def create_trainer(cfg, verbose=True):
     
     from pytorch_lightning.loggers import WandbLogger
 
-    wandb_logger = pl.loggers.WandbLogger(name=None, save_dir=None, offline=False, id=None, anonymous=None, version=None, project=cfg["target_name"],  log_model=False, experiment=None, prefix='')
-    hyperparam_dict = {**cfg}
-    wandb_logger.log_hyperparams(hyperparam_dict)
+    if log:
+        wandb_logger = pl.loggers.WandbLogger(name=None, save_dir=None, offline=False, id=None,
+                                              anonymous=None, version=None, project=cfg["target_name"],
+                                              log_model=False, experiment=None, prefix='')
+        hyperparam_dict = {**cfg}
+        wandb_logger.log_hyperparams(hyperparam_dict)
+    else:
+        wandb_logger = None
 
     # log gradients and model topology
     #wandb_logger.watch(lit_model)
 
     
     # early stopping and model checkpoint
-    es = EarlyStopping(monitor='val_loss', patience=3, verbose=False, mode="min", check_on_train_epoch_end=False)
+    #es = EarlyStopping(monitor='val_loss', patience=3, verbose=False, mode="min", check_on_train_epoch_end=False)
     #mc = ModelCheckpoint(monitor='val_loss', verbose=False, save_last=False, save_top_k=1,
     #                     save_weights_only=False, mode='min', period=None)
     callbacks = []
@@ -148,13 +154,13 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def train_nn(model_type, data_module, cfg, verbose=True):
+def train_nn(model_type, data_module, cfg, verbose=True, log=True):
     # init model and trainer
     model = create_model(model_type, data_module, cfg)
     # print number of trainable parameters if verbose
     if verbose:
         print("Number of trainable parameters: ", count_parameters(model))
-    trainer = create_trainer(cfg, verbose=verbose)
+    trainer = create_trainer(cfg, verbose=verbose, log=log)
     # track gradients etc
     if verbose:
         trainer.logger.watch(model)
@@ -201,7 +207,7 @@ def train_classical(model_type, data_module, cfg, verbose=True):
     # prep data to have one time step as input
     inputs = data_module.train_dataloader().dataset.flat_inputs
     targets = data_module.train_dataloader().dataset.flat_targets
-    # bring into right shape
+    # bring into right shape and avoid NaN targets
     mask = ~np.isnan(targets)
     inputs = inputs[mask]
     targets = targets[mask]
@@ -242,25 +248,26 @@ def train_classical(model_type, data_module, cfg, verbose=True):
         from sklearn.linear_model import ElasticNet, LogisticRegression
         if data_module.regression:
              clf = ElasticNet(alpha=cfg["alpha"], 
-                             l1_ratio=cfg["l1_ratio"])
+                              l1_ratio=cfg["l1_ratio"])
         else:        
-            clf = LogisticRegression(penalty="elasticnet", solver="saga",
-                                                          C=cfg["alpha"], 
-                                                         l1_ratio=cfg["l1_ratio"])
+            clf = LogisticRegression(penalty="elasticnet", 
+                                     solver="saga",
+                                     C=cfg["C"], 
+                                     l1_ratio=cfg["l1_ratio"],
+                                     max_iter=cfg["max_iter"])
     clf.fit(inputs, targets)
     return clf, data_module
 
 
-def train_model(model_type, data_modules, cfg, verbose=True):
+def train_model(model_type, data_modules, cfg, verbose=True, log=True):
     classical_models = ["linear", "xgb", "rf"]
-    num_trains = len(data_modules)
     models = []
     trainers = []
     for data_module in data_modules:
         if model_type in classical_models:
             model, trainer = train_classical(model_type, data_module, cfg, verbose=verbose)
         else:
-            model, trainer = train_nn(model_type, data_module, cfg, verbose=verbose)
+            model, trainer = train_nn(model_type, data_module, cfg, verbose=verbose, log=log)
         # store model
         models.append(model)
         trainers.append(trainer)

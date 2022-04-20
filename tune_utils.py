@@ -1,276 +1,283 @@
-import operator
-from datetime import datetime
 import os
-import json
-import tracemalloc
-import linecache
+import datetime
+import copy
 
+import sklearn
+import numpy as np
+from tqdm.auto import tqdm
+import pandas as pd
 import matplotlib.pyplot as plt
 import optuna
-import numpy as np
 
 from train_utils import train_model
+from data_utils import SeqDataModule
 from eval_utils import get_all_dfs
-from data_utils import do_fold
 
 
-def display_top(snapshot, key_type='lineno', limit=10):
-    snapshot = snapshot.filter_traces((
-        tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
-        tracemalloc.Filter(False, "<unknown>"),
-    ))
-    top_stats = snapshot.statistics(key_type)
+def obj(df, cfg, opt_object, num_seeds=3, split="val"):
+    # put in op_df
+    cfg = copy.deepcopy(cfg)
+    if isinstance(opt_object, pd.DataFrame):
+        opt_dict = opt_object.iloc[0].to_dict()
+    else:
+        opt_dict = opt_object
+    cfg = merge_params_in_cfg(cfg, opt_dict)
+    # calculate metrics for number of seeds
+    if num_seeds is None:
+        metric = train_and_eval_model(df, cfg, split=split, log=False)
+    else:
+        metrics = []
+        for seed in range(num_seeds):
+            cfg["seed"] = seed
+            metrics.append(train_and_eval_model(df, cfg, split=split, log=False))
+        metric = np.mean(metrics)
+    return metric
 
-    print("Top %s lines" % limit)
-    for index, stat in enumerate(top_stats[:limit], 1):
-        frame = stat.traceback[0]
-        print("#%s: %s:%s: %.1f KiB" % (index, frame.filename, frame.lineno, stat.size / 1024))
-        line = linecache.getline(frame.filename, frame.lineno).strip()
-        if line:
-            print('    %s' % line)
-    other = top_stats[limit:]
-    if other:
-        size = sum(stat.size for stat in other)
-        print("%s other: %.1f KiB" % (len(other), size / 1024))
-    total = sum(stat.size for stat in top_stats)
-    print("Total allocated size: %.1f KiB" % (total / 1024))
-   
 
-def snapshot():
-    snapshot = tracemalloc.take_snapshot()
-    import numpy as np
-    np.save("snapshot", snapshot)
-    top_stats = snapshot.statistics('lineno')
-    np.save("top_stats", top_stats)
+def scale_hyperparameters(opt_df):
+    # scale batch size exponentially
+    if "bs" in opt_df:
+        opt_df["bs"] = 2 ** opt_df["bs"]
+    # enable nan_embed layer if we do not fill nans
+    if opt_df["fill_type"] == "none":
+        opt_df["use_nan_embed"] = True
+    # set min len to max len
+    if "max_len" in opt_df:
+        opt_df["min_len"] = opt_df["max_len"]
+    # convert to int
+    if "flat_block_size" in opt_df:
+        opt_df["flat_block_size"] =int(opt_df["flat_block_size"])
+    if "n_estimators" in opt_df:
+        opt_df["n_estimators"] = int(opt_df["n_estimators"])
+    if "bs" in opt_df:
+        opt_df["bs"] = int(opt_df["bs"])
+    if "batch_size" in opt_df:
+        opt_df["batch_size"] = int(opt_df["batch_size"])
+
+    return opt_df
+
+
+def train_and_eval_model(df, cfg, split, log=True):
+    dm, models, trainers = setup_dm_and_train(df, cfg, log=log)
+    metric = eval_model(dm, models, trainers, cfg["model_type"], split)
+    return metric
+
+
+def setup_dm(df, cfg):
+    import pytorch_lightning as pl
+    pl.utilities.seed.seed_everything(seed=cfg["seed"], workers=False)
+    # create datamodule with dataloaders
+    dm = SeqDataModule(df, cfg["db_name"],
+                       target_name=cfg["target_name"],
+                       random_starts=cfg["random_starts"], 
+                       min_len=cfg["min_len"], 
+                       max_len=cfg["max_len"],
+                       train_noise_std=cfg["train_noise_std"], 
+                       batch_size=cfg["bs"], 
+                       fill_type=cfg["fill_type"], 
+                       flat_block_size=cfg["flat_block_size"],
+                       target_nan_quantile=cfg["target_nan_quantile"],
+                       block_size=cfg["block_size"],
+                       subsample_frac=cfg["subsample_frac"],
+                       )
+    dm.setup()
+    return dm
+
+
+def setup_dm_and_train(df, cfg, log=True):
+    #setup dm
+    dm = setup_dm(df, cfg)
+    # train model on datamodule
+    models, trainers = train_model(cfg["model_type"], [dm], cfg, verbose=False, log=log)
+    return dm, models, trainers
+
+
+def eval_model(dm, models, trainers, model_type, split):
+    # make preds on val set
+    pred_df = get_all_dfs(models, trainers, model_type, dm.regression, dl_type=split, dl=None, calc_new_norm_stats=False)
     
-    print("[ Top 10 ]")
-    for stat in top_stats[:10]:
-        print(stat)
-    display_top(snapshot)
+    # calc target metrics
+    pred_df = pred_df.dropna(subset=["targets"])
+    pred_targets = pred_df["targets"]
+    preds = pred_df["preds"]
+    if dm.regression:
+        try:
+            score = sklearn.metrics.r2_score(pred_targets, preds)
+        except ValueError:
+            score = -10
+    else:
+        try:
+            score = sklearn.metrics.roc_auc_score(pred_targets, preds)
+        except ValueError:
+            score = 0        
+    return np.array([score])
 
 
-def store_study_results(study, path, test_idcs, args):
-    name = study.study_name
-    path = os.path.join(path, name)
-    
-    os.makedirs(path, exist_ok=True)
-    # dump test idcs
-    np.save(os.path.join(path, "test_idcs.npy"), test_idcs)
-    # dump params
-    best_params = study.best_params
-    with open(os.path.join(path, "best_params.json"), "w+") as f:
-        json.dump(best_params, f)
-    # dump args
-    with open(os.path.join(path, "args.json"), "w+") as f:
-        json.dump(args, f)
-    # make plots
-    optuna.visualization.matplotlib.plot_optimization_history(study)
-    plt.savefig(os.path.join(path, "opt_history.png"))
-    optuna.visualization.matplotlib.plot_param_importances(study)
-    plt.savefig(os.path.join(path, "param_importances_value.png"))
-    optuna.visualization.matplotlib.plot_param_importances(study, target=lambda t: t.duration.total_seconds(), target_name="duration")
-    plt.savefig(os.path.join(path, "param_importances_duration.png"))
-    optuna.visualization.matplotlib.plot_slice(study)
-    plt.savefig(os.path.join(path, "slice.png"))
+def get_val_and_test_metric(dm, models, trainers, cfg):
+    val_metric = eval_model(dm, models, trainers, cfg["model_type"], "val")
+    test_metric = eval_model(dm, models, trainers, cfg["model_type"], "test")
+    return val_metric, test_metric
 
 
-def calc_metric(model_df):
-    return model_df.groupby("ids").apply(lambda pat: pat["error"].mean()).mean()
-    
+def merge_params_in_cfg(cfg, params):
+    cfg = copy.deepcopy(cfg)
+    # put the best hyperparameters in the config
+    cfg.update(params)
+    cfg = scale_hyperparameters(cfg)
+    return cfg
 
-class Objective:
-    def __init__(self, dev_data, test_data, args, model_args, verbose=True, opt_flat_block_size=False, opt_augs=False, opt_fill_type=False):
-        self.dev_data = dev_data
-        self.test_data = test_data
-        self.args = args
-        self.model_args = model_args
-        self.model_type = args["model_type"]
-        self.verbose = verbose
-        self.opt_flat_block_size = opt_flat_block_size
-        self.opt_augs = opt_augs
-        self.opt_fill_type = opt_fill_type
+
+def train_and_test(df, cfg, best_params, num_seeds=5, return_weights=False):
+    # train the model with the best hyperparameters and test it on test split
+    cfg = merge_params_in_cfg(cfg, best_params)
+
+    val_scores = []
+    test_scores = []
+    weights = []
+    for seed in tqdm(range(num_seeds), desc="Training models with best parameters", disable=num_seeds==1):
+        cfg["seed"] = seed
+        dm, models, trainers = setup_dm_and_train(df, cfg)
+        val_score, test_score = get_val_and_test_metric(dm, models, trainers, cfg)
         
-        # prepare training data
-        # make train datasets
-        self.data_modules = do_fold(dev_data, test_data, 
-                                    args["dbs"], 
-                                    model_args["random_starts"], 
-                                    model_args["min_len"], 
-                                    model_args["train_noise_std"],
-                                    model_args["bs"],
-                                    model_args["fill_type"], 
-                                    args["flat_block_size"],
-                                    k_fold=args["k_fold"], 
-                                    num_splits=args["num_splits"],
-                                   )
+        if hasattr(models[0], "state_dict") and return_weights:
+            model_weights = models[0].state_dict()  # get weights of the model
+            model_weights = {k: v.cpu() for k, v in model_weights.items()}  # move to cpu
+            weights.append(model_weights)
+        val_scores.append(val_score)
+        test_scores.append(test_score)
 
-    def __call__(self, trial):
-        # get function that realizes call for given classifier
-        self.suggest_hyperparams(trial)
-        
-        # train model N times
-        models, trainers = train_model(self.model_type, self.data_modules, self.model_args, verbose=False)
+    if return_weights:
+        return val_scores, test_scores, weights
+    else:
+        return val_scores, test_scores
 
-        # calc metrics over N trainings
-        df = get_all_dfs(models, trainers, self.model_type, dl_type="val")
 
-        # get avg metric
-        #metric = df.groupby("model_id").apply(lambda model_df: model_df.groupby("ids")["error"].mean()).mean()
-        metric = df.groupby("model_id").apply(lambda model_df: calc_metric(model_df))
-        if self.verbose:
-            print(metric)
-        metric = metric.mean() + metric.std()
+def retrain_best_trial(study, df, cfg, folder_name):
+    # get the best hyperparameters
+    best_trial = study.best_trial
+    best_params = best_trial.params
 
-        return metric
-    
-    def suggest_hyperparams(self, trial):
-        dl_models = ["rnn", "mlp", "transformer"]
-        
-        # data and general hyperparameters
-        if self.opt_fill_type:
-            fill_type = trial.suggest_categorical("fill_type", ["pat_mean", "mean", "pat_ema" "pat_ema_mask"])
-            for dm in self.data_modules:
-                dm.fill(dm.median, fill_type)
-                dm.norm(dm.mean, dm.std)
-                if not self.opt_flat_block_size:
-                    dm.make_flat_arrays()
-        
-        if self.model_type in dl_models:
-            if self.opt_augs:
-                train_noise_std = trial.suggest_float("train_noise_std", 0.01, 0.2)
-                random_starts = trial.suggest_int("random_starts", 0, 1)          
-                for dm in self.data_modules:
-                    dm.train_noise_std = train_noise_std
-                    dm.random_starts = random_starts
-                if random_starts:
-                    min_len = trial.suggest_int("min_len", 1, 50)
-                    for dm in self.data_modules:
-                        dm.min_len = min_len
+    val_scores, test_scores, weights = train_and_test(df, cfg, best_params, 
+                                                      num_seeds=5, return_weights=True)
+
+    # store best params and scores in a dataframe
+    best_param_df = pd.DataFrame(best_params, index=[0])
+    best_param_df["val_score_mean"] = np.mean(val_scores)
+    best_param_df["val_score_std"] = np.std(val_scores)
+    best_param_df["test_score_mean"] = np.mean(test_scores)
+    best_param_df["test_score_std"] = np.std(test_scores)
+    best_param_df.to_csv(f"{folder_name}/best_params.csv")
+
+    # save cfg
+    import json
+    with open(f"{folder_name}/cfg.json", "w+") as f:
+        json.dump(cfg, f)
+
+    return val_scores, test_scores, weights
+
+
+def get_best_params(study, num_trials=5):
+    trials = study.trials
+    best_trials = sorted(trials, key=lambda trial: trial.value, reverse=True)[:num_trials]
+    top_params = [trial.params for trial in best_trials]
+    top_vals = [trial.value for trial in best_trials]
+    return top_params, top_vals
+
+
+def train_multiple(param_list, df, cfg):
+    # train models for the best params and get the model weights
+    top_param_weights = []
+    top_param_val_scores = []
+    top_param_test_scores = []
+    for params in tqdm(param_list, desc="Training models with best parameters", disable=len(param_list)==1):
+        val_scores, test_scores, weights = train_and_test(df, cfg, params, num_seeds=1, return_weights=True)
+        top_param_val_scores.append(val_scores[0])
+        top_param_test_scores.append(test_scores[0])
+        top_param_weights.append(weights[0])
+    return top_param_val_scores, top_param_test_scores, top_param_weights
+
+
+def make_optuna_foldername(cfg):
+    # create folder name according to the database name, minutes, model type and date
+    folder_name = f"tunings/{cfg['db_name']}_{cfg['minutes']}/{cfg['model_type']}_{cfg['opt_steps']}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    os.makedirs(folder_name, exist_ok=True)
+    return folder_name
+
+
+def save_study_results(study, folder_name, model_type):
+    # create a dataframe with the results
+    tune_result_df = pd.DataFrame(study.trials_dataframe())
+    tune_result_df.to_csv(f"{folder_name}/results.csv")
+
+    def save_plot(plot, name):
+        plot.write_image(os.path.join(folder_name, name + ".png"), width=1024 * 1.5, height=800 * 1.5)
+
+    plot = optuna.visualization.plot_slice(study)
+    save_plot(plot, "slice")
+    plot = optuna.visualization.plot_param_importances(study)
+    save_plot(plot, "param_importances")
+    plot = optuna.visualization.plot_optimization_history(study)
+    save_plot(plot, "optimization_history")
+    if model_type in ["rnn", "gpt", "mlp"]:
+        plot = optuna.visualization.plot_contour(study, params=["lr", "bs", "weight_decay", "grad_clip_val"])
+    elif model_type == "xgb":
+        plot = optuna.visualization.plot_contour(study, params=["lr", "n_estimators", "max_depth", "subsample",
+                                                                "colsample_bytree", "gamma", "min_child_weight",
+                                                                "flat_block_size"])
+    elif model_type == "linear":
+        plot = optuna.visualization.plot_contour(study, params=["C", "max_iter", "flat_block_size"])
+    save_plot(plot, "contour")
+
+def suggest_deep_learning(trial: optuna.trial.Trial):
+    # suggest hyperparameters for deep learning models
+    rec = {'lr': trial.suggest_loguniform("lr", 0.00005, 0.01),
+            #'min_len': trial.suggest_int("min_len", 2, 128),
+            #'train_noise_std': trial.suggest_float("train_noise_std", 0.001, 0.2),
+            #'weight_decay': trial.suggest_float("weight_decay", 0.001, 0.4),
+            #'grad_clip_val': trial.suggest_float("grad_clip_val", 0.1, 5.0),   
+            #'train_noise_std': trial.suggest_int("train_noise_std", 0, 2),
+            'weight_decay': trial.suggest_discrete_uniform("weight_decay", 0.0, 4.0, 0.1),
+            'grad_clip_val': trial.suggest_discrete_uniform("grad_clip_val", 0, 2.0, 0.1), 
+            'bs': trial.suggest_int("bs", 2, 6),
+            #'fill_type': trial.suggest_categorical("fill_type", ["median", "none"]),
+            #'max_epochs': trial.suggest_int("max_epochs", 5, 100),
+            }
+    return rec
+
+
+def suggest_tree(trial):
+    rec = {'lr': trial.suggest_loguniform("lr", 0.0005, 0.5),
+            'n_estimators': trial.suggest_discrete_uniform("n_estimators", 10, 300, 10),
+            'max_depth': trial.suggest_int("max_depth", 2, 10),
+            'subsample': trial.suggest_discrete_uniform("subsample", 0.5, 1.0, 0.05),
+            'colsample_bytree': trial.suggest_discrete_uniform("colsample_bytree", 0.3, 1.0, 0.05),
+            'gamma': trial.suggest_discrete_uniform("gamma", 0.0, 3.0, 0.1),
+            'min_child_weight': trial.suggest_discrete_uniform("min_child_weight", 0.0, 3.0, 0.1),
+            #'fill_type': trial.suggest_categorical("fill_type", ["median", "none"]),
+    }
+    return rec
+
+def suggest_logreg(trial):
+    # suggest hyperparameters for sklearn logistic regression
+    rec = {'C': trial.suggest_loguniform("C", 0.00005, 10.0),
+           'max_iter': trial.suggest_int("max_iter", 10, 500),
+           'l1_ratio': trial.suggest_discrete_uniform("l1_ratio", 0.0, 1.0, 0.05),}
+    return rec
+
+def objective_optuna(trial: optuna.Trial, df, cfg):
+    # Invoke suggest methods of a Trial object to generate hyperparameters.
+    if cfg["model_type"] in ["rnn", "gpt", "mlp"]:
+        rec = suggest_deep_learning(trial)
+    else:
+        if cfg["model_type"] in ("xgb", "rf"):
+            rec = suggest_tree(trial)
+        elif cfg["model_type"] == "linear":
+            rec = suggest_logreg(trial)
+
+        if cfg["flat_block_size_range"] > 1:
+            rec["flat_block_size"] =  trial.suggest_discrete_uniform("flat_block_size", 0, cfg["flat_block_size_range"], 1)
         else:
-            if self.opt_flat_block_size:
-                flat_block_size = trial.suggest_int("flat_block_size", 0, 10)
-                for dm in self.data_modules:
-                    dm.flat_block_size = flat_block_size
-                    dm.make_flat_arrays()
-        
-        # model hyperparameters
-        if self.model_type == "linear":
-            self.add_float(trial, "alpha", [0.1, 10])
-            self.add_float(trial, "l1_ratio", [0.01, 0.99])
-        elif self.model_type == "xgb" or self.model_type == "rf":
-            self.add_int(trial, "n_estimators", [3, 250])
-            self.add_int(trial, "max_depth", [1, 16])
-            self.add_float(trial, "learning_rate", [0.01, 0.5])
-            self.add_float(trial, "subsample", [0.6, 1.0])
-            self.add_float(trial, "min_child_weight", [1, 20.0])
-            self.add_float(trial, "colsample_bytree", [0.6, 1.0])
-            self.add_float(trial, "gamma", [0.01, 20.0])
-        elif self.model_type in dl_models:
-            self.add_float(trial, "grad_clip_val", [0.1, 10.0])
-            self.add_int(trial, "hidden_size", [64, 1024])
-            self.add_float(trial, "dropout", [0.0, 0.5])
-            # need to set bs manually
-            bs = trial.suggest_int("bs", 1, 5)
-            for dm in self.data_modules:
-                dm.batch_size = 2 ** bs 
-            
-            if self.model_type == "rnn":
-                self.add_int(trial, "rnn_layers", [1, 10])
-                self.add_cat(trial, "rnn_type", ["lstm", "gru"])
-                
-            if self.model_type == "transformer":
-                self.add_float(trial, "lr", [0.00003, 0.1])
-                self.add_int(trial, "n_layers", [1, 3])
-                self.model_args["n_heads"] = 2 ** trial.suggest_int("n_heads", 0, 2)
-                #self.add_int(trial, "n_heads", [1, 16])
-                self.model_args["emb_dim"] = 2 ** trial.suggest_int("emb_dim", 3, 8)
-                #self.add_int(trial, "emb_dim", [32, 1024])
-            else:
-                # allow higher lr for transformer
-                self.add_float(trial, "lr", [0.00003, 0.005])
+            rec["flat_block_size"] = 1
+    score = obj(df, cfg, rec)
+    return score  
 
-        else:
-            pass
-
-    def add_cat(self, trial, key, range_):
-        self.model_args[key] = trial.suggest_categorical(key, range_)
-
-    def add_int(self, trial, key, range_):
-        self.model_args[key] = trial.suggest_int(key, *range_)
-
-    def add_logun(self, trial, key, range_):
-        self.model_args[key] = trial.suggest_loguniform(key, *range_)
-
-    def add_float(self, trial, key, range_):
-        self.model_args[key] = trial.suggest_float(key, *range_)
-
-
-class EarlyStoppingCallback:
-    """Early stopping callback for Optuna to stop tuning."""
-    def __init__(self, early_stopping_rounds: int, direction: str = "minimize") -> None:
-        self.early_stopping_rounds = early_stopping_rounds
-        self._iter = 0
-        if direction == "minimize":
-            self._operator = operator.lt
-            self._score = np.inf
-        elif direction == "maximize":
-            self._operator = operator.gt
-            self._score = -np.inf
-        else:
-            ValueError(f"invalid direction: {direction}")
-
-    def __call__(self, study: optuna.Study, trial: optuna.Trial) -> None:
-        """Do early stopping."""
-        if self._operator(study.best_value, self._score):
-            self._iter = 0
-            self._score = study.best_value
-        else:
-            self._iter += 1
-        if self._iter >= self.early_stopping_rounds:
-            study.stop()
-
-
-def make_study_name(args):
-    now = datetime.now().strftime("%m_%d_%H_%M_%S_")
-    study_name = f'{now}_{args["model_type"]}_{"_".join(args["dbs"])}_{args["n_trials"]}_{args["minutes"]}'
-    
-    if args["opt_flat_block_size"]:
-        study_name += "_optFlatBlockSize"
-    if args["opt_augs"]:
-        study_name += "_optAugs"
-    if args["opt_fill_type"]:
-        study_name += "_opt_fill_type"
-    
-    return study_name
-    
-    
-def tune(dev_data, test_data, args, model_args, verbose=True, n_trials=50, **kwargs):
-    study_name = make_study_name(args)
-
-    if verbose:
-        print(study_name)
-    # Create Objective
-    objective = Objective(dev_data, test_data, args, model_args, verbose=verbose, **kwargs)
-
-    # Create sampler
-    sampler = optuna.samplers.TPESampler()
-    # Create pruner
-    pruner = None#create_pruner(pruner_name="median")
-    # Get database:
-    storage = optuna.storages.RDBStorage(url="sqlite:///optuna.db",
-                                         engine_kwargs={"connect_args": {"timeout": 30}})
-    direction = "minimize"
-    study = optuna.create_study(direction=direction, 
-                                study_name=study_name,
-                                pruner=pruner, 
-                                sampler=sampler, 
-                                storage=storage)
-    # store test idcs in study
-
-    if not verbose:
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
-        
-    early_stopping = EarlyStoppingCallback(30, direction=direction)
-        
-    study.optimize(objective, n_trials=n_trials, n_jobs=1, show_progress_bar=True, callbacks=[early_stopping])
-    return study

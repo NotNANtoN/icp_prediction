@@ -80,7 +80,8 @@ def make_fold(seq_list, k=5):
 def make_split(seq_list, test_size=0.2):
     indices = np.arange(len(seq_list))
     labels = create_seq_labels(seq_list)
-    train_data, val_data, train_idcs, val_idcs = train_test_split(seq_list, indices, test_size=test_size, stratify=labels, shuffle=True)
+    train_data, val_data, train_idcs, val_idcs = train_test_split(seq_list, indices, test_size=test_size,
+                                                                  stratify=labels, shuffle=True)
     return train_data, val_data, train_idcs, val_idcs
 
 
@@ -105,13 +106,15 @@ def seq_pad_collate(batch):
     return [padded_inputs, padded_targets, lens]
 
 
-def make_flat_inputs(inputs, flat_block_size, targets=None):
+def make_flat_inputs(inputs, flat_block_size, fill_type, median, max_len, targets=None):
     if flat_block_size > 0:
         # make blocks
         num_feats = inputs[0].shape[-1]
         all_blocks = []
         for pat_idx, pat in enumerate(inputs):
             pat = pat.numpy()
+            if max_len > 0:
+                pat = pat[:max_len]
             for time_idx in range(len(pat)):
                 # skip block for training if targets are given
                 if targets is not None and np.isnan(targets[pat_idx][time_idx]):
@@ -122,8 +125,11 @@ def make_flat_inputs(inputs, flat_block_size, targets=None):
                 block = pat[start_idx: end_idx]
                 size_diff = flat_block_size - block.shape[0]
                 if size_diff > 0:
-                    # pad start with nans
-                    pad_prefix = np.zeros((size_diff, num_feats)) * np.nan
+                    # pad start with zeros
+                    if fill_type == "none":
+                        pad_prefix = np.zeros((size_diff, num_feats)) * np.nan
+                    elif fill_type == "median":
+                        pad_prefix = np.full((size_diff, num_feats), median)
                     block = np.concatenate([pad_prefix, block], axis=0)
                 # make flat
                 block = block.reshape(-1)
@@ -172,6 +178,7 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
                  target_name = "ICP_Vital", target_nan_quantile=0,
                  block_size=0,
                  max_len=0,
+                 subsample_frac=1.0,
                 ):
         super().__init__()
         
@@ -265,19 +272,60 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
         self.mean_train_target = train_data["target"].mean()
         self.mean_train_target_pat = train_data.groupby("Pat_ID").apply(lambda pat: pat["target"].mean()).mean()
         
+        # create tokenizer for gpt if needed
+        create_tokenier = False
+        if create_tokenier:
+            # todo: in preprocess all, we want to apply the procedure below to fit the kmeans tokenizer on train data
+            # TODO: then we want to apply kmeans tokenizer to all input steps
+            # TODO: finally we need to adjust the GPT model creation - we now just need to reinitialize the dictionary at the start
+            # TODO: ! make sure that this dictionary is set to trainable in apply_train_mode, as the "adapters" setting will set it to requires_grad=False
+            
+
+            filled_df = df.copy().fillna(df.median())
+            cluster_df = filled_df.copy().drop(columns=["split"])
+            cluster_df = cluster_df.drop(columns=["Pat_ID"])
+            # create 4 time steps for each Pat_ID that averages the steps between 0-25%, 25-50, 50-75, 75-100%
+            def summarize_pat(pat):
+                first_quarter = pat.iloc[:int(len(pat) * 0.25)].mean(axis=0)
+                second_quarter = pat.iloc[int(len(pat) * 0.25):int(len(pat) * 0.5)].mean(axis=0)
+                third_quarter = pat.iloc[int(len(pat) * 0.5):int(len(pat) * 0.75)].mean(axis=0)
+                fourth_quarter = pat.iloc[int(len(pat) * 0.75):].mean(axis=0)
+                out = [first_quarter, second_quarter, third_quarter, fourth_quarter]
+                return pd.DataFrame([o.to_numpy() for o in out], columns=pat.columns)#.drop(columns=["Pat_ID"]).columns)
+            def summarize_pat_generalized(pat, num_partitions=4):
+                out = []
+                for i in range(num_partitions):
+                    out.append(pat.iloc[int(len(pat) * i / num_partitions):int(len(pat) * (i + 1) / num_partitions)].mean(axis=0))
+                return pd.DataFrame([o.to_numpy() for o in out], columns=pat.columns)#.drop(columns=["Pat_ID"]).columns)
+
+            cluster_df = cluster_df.groupby("Pat_ID").apply(lambda x: summarize_pat_generalized(x, 4) if len(x) >= 4 else None)# x.sample(4, random_state=cfg["seed"]) if len(x) > 4 else None)
+            cluster_df = cluster_df.reset_index(drop=True).drop(columns=["Pat_ID"])
+
+            # import kmeans from sklearn
+            from sklearn.cluster import KMeans
+            # create kmeans model
+            kmeans = KMeans(n_clusters=100, random_state=0).fit(cluster_df)
+            # get cluster centroids
+            centroids = kmeans.cluster_centers_
+            centroid_df = pd.DataFrame(centroids, columns=cluster_df.columns)
+            # predict labels for cluster df
+            labels = kmeans.predict(cluster_df)
+
+
         # create datasets
-        self.train_ds = SequenceDataset(train_data, self.target_name, train=True,
+        self.train_ds = SequenceDataset(train_data, train=True,
                                         random_starts=self.random_starts,
                                         block_size=self.block_size,
                                         min_len=self.min_len, 
                                         max_len=self.max_len,
                                         train_noise_std=self.train_noise_std,
                                         flat_block_size=self.flat_block_size,
-                                        target_nan_quantile=self.target_nan_quantile) if train_data is not None else None
-        self.val_ds = SequenceDataset(val_data, self.target_name, train=False, random_starts=False, block_size=self.block_size, 
+                                        target_nan_quantile=self.target_nan_quantile,
+                                        subsample_frac=subsample_frac) if train_data is not None else None
+        self.val_ds = SequenceDataset(val_data, train=False, random_starts=False, block_size=self.block_size, 
                          train_noise_std=0.0, flat_block_size=self.flat_block_size,
                                      max_len=self.max_len,) if val_data is not None else None
-        self.test_ds = SequenceDataset(test_data, self.target_name, train=False, random_starts=False, block_size=self.block_size, 
+        self.test_ds = SequenceDataset(test_data, train=False, random_starts=False, block_size=self.block_size, 
                          train_noise_std=0.0, flat_block_size=self.flat_block_size,
                                       max_len=self.max_len,) if test_data is not None else None
         self.datasets = [ds for ds in [self.train_ds, self.val_ds, self.test_ds] if ds is not None]
@@ -326,7 +374,8 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
 
         
 class SequenceDataset(torch.utils.data.Dataset):
-    def __init__(self, data, target_name, train, random_starts=1, block_size=0, min_len=10, train_noise_std=0.1, dbs="all", flat_block_size=0, target_nan_quantile=0, max_len=0):
+    def __init__(self, data, train, random_starts=1, block_size=0, min_len=10, train_noise_std=0.1, 
+                 flat_block_size=0, target_nan_quantile=0, max_len=0, subsample_frac=1.0):
         self.random_starts = random_starts
         self.min_len = min_len
         self.max_len = max_len
@@ -335,6 +384,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.train = train
         self.flat_block_size = flat_block_size
         self.target_nan_quantile = target_nan_quantile
+        self.subsample_frac = subsample_frac
         
         if target_nan_quantile > 0:
             data = data.copy()
@@ -345,6 +395,9 @@ class SequenceDataset(torch.utils.data.Dataset):
         
         # copy each sequence to not modify it outside of here
         data = [data[data["Pat_ID"] == pat_id].drop(columns=["Pat_ID"]) for pat_id in data["Pat_ID"].unique()]
+        # subsampe part of patients
+        if subsample_frac < 1.0:
+            data = [data[i] for i in np.random.choice(range(len(data)), int(len(data) * subsample_frac), replace=False)]
         self.raw_inputs = to_torch([p.drop(columns=["target"]) for p in data])
         self.targets = to_torch([p["target"] for p in data])
         
@@ -364,31 +417,34 @@ class SequenceDataset(torch.utils.data.Dataset):
         y = self.targets[index]
         seq_len = len(x)
         
-        if self.block_size:
-            total_len = self.block_size
-            if self.train:
-                start_idx = random.randint(0, seq_len - total_len) if seq_len > total_len else 0
+        if self.train:
+            if self.block_size:
+                total_len = self.block_size
+                if self.train:
+                    start_idx = random.randint(0, seq_len - total_len) if seq_len > total_len else 0
+                    end_idx = start_idx + total_len
+                else:
+                    start_idx = 0
+                    end_idx = len(x)
+                
+                x = x[start_idx: end_idx]
+                y = y[start_idx: end_idx]
+                #if len(x) < self.block_size:
+                #    x_padding = torch.zeros(size=(self.block_size - len(x), x.shape[1]), dtype=x.dtype)
+                #    x = torch.cat((x, x_padding))
+                #    y_padding = torch.zeros(size=(self.block_size - len(y),), dtype=y.dtype) * np.nan
+                #    y = torch.cat((y, y_padding))
+                #y = y[-1]
+                #y = y.unsqueeze(0)
+                #seq_len = end_idx - start_idx
+            #elif self.random_starts:
+            #    start_idx = random.randint(0, max(seq_len - self.min_len, 0))
+            #    if start_idx > 0:
+            #        x = x[start_idx:]
+            #        y = y[start_idx:]
             else:
                 start_idx = 0
-            end_idx = start_idx + total_len
-            x = x[start_idx: end_idx]
-            y = y[start_idx: end_idx]
-            if len(x) < self.block_size:
-                x_padding = torch.zeros(size=(self.block_size - len(x), x.shape[1]), dtype=x.dtype)
-                x = torch.cat((x, x_padding))
-                y_padding = torch.zeros(size=(self.block_size - len(y),), dtype=y.dtype) * np.nan
-                y = torch.cat((y, y_padding))
-            #y = y[-1]
-            #y = y.unsqueeze(0)
-            seq_len = end_idx - start_idx
-        elif self.random_starts:
-            start_idx = random.randint(0, max(seq_len - self.min_len, 0))
-            if start_idx > 0:
-                x = x[start_idx:]
-                y = y[start_idx:]
-        else:
-            start_idx = 0
-            
+                
         if self.max_len > 0:
             x = x[: self.max_len]
             y = y[: self.max_len]
@@ -419,7 +475,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.norm(mean, std)
 
         # 3. make flat inputs for classical ML models after having preprocessed the data
-        self.make_flat_arrays()
+        self.make_flat_arrays(fill_type, median)
         
         self.all_preprocessed = True
         self.mean = mean
@@ -469,7 +525,6 @@ class SequenceDataset(torch.utils.data.Dataset):
         elif fill_type == "pat_ema_mask":
             ema_val = 0.3
             pat = ema_fill_mask(pat, ema_val, median)
-    
 
         pat = torch.from_numpy(pat)
         median = torch.from_numpy(median)
@@ -500,8 +555,9 @@ class SequenceDataset(torch.utils.data.Dataset):
     def norm_pat(self, pat, mean, std):
         return (pat - mean) / std
         
-    def make_flat_arrays(self, flat_block_size=None):
+    def make_flat_arrays(self, fill_type, median, flat_block_size=None):
         if flat_block_size is None:
             flat_block_size = self.flat_block_size
-        self.flat_inputs = make_flat_inputs(self.inputs, self.flat_block_size)
+        max_len = 0 if self.train else self.max_len
+        self.flat_inputs = make_flat_inputs(self.inputs, self.flat_block_size, fill_type, median, max_len)
         self.flat_targets = np.concatenate([data for data in self.targets], axis=0)

@@ -14,7 +14,7 @@ from x_transformers.x_transformers import AttentionLayers
 class LitSeqModel(pl.LightningModule):
     def __init__(self, data_module, max_epochs=5, weight_decay=0.1, use_macro_loss=True, 
                  use_pos_weight=True, use_nan_embed=False, lr=0.001, use_huber=False,
-                 use_static=True):
+                 use_static=True, freeze_nan_embed=False, norm_nan_embed=False, nan_embed_size=512):
         super().__init__()        
         self.data_module = data_module
         self.regression = data_module.regression
@@ -23,6 +23,9 @@ class LitSeqModel(pl.LightningModule):
         self.lr = lr
         self.use_huber = use_huber
         self.use_static = use_static
+        self.freeze_nan_embed = freeze_nan_embed
+        self.nan_embed_size = nan_embed_size
+        self.norm_nan_embed = norm_nan_embed
         
         # get feature names
         feature_names = self.data_module.feature_names
@@ -54,9 +57,16 @@ class LitSeqModel(pl.LightningModule):
         
         if self.use_nan_embed:
             from nan_emb import NanEmbed
-            emb_size = 512
+            emb_size = self.nan_embed_size
             self.embed = NanEmbed(self.num_inputs, emb_size)
-            #self.embed = torch.jit.script(self.embed)
+            self.embed = torch.jit.script(self.embed)
+
+            if self.freeze_nan_embed:
+                for p in self.embed.parameters():
+                    p.requires_grad = False
+
+            if self.norm_nan_embed:
+                self.embed = torch.nn.Sequential(self.embed, torch.nn.LayerNorm(emb_size))
             
             self.num_recurrent_inputs = emb_size
             self.num_static_inputs = 0
@@ -110,16 +120,20 @@ class LitSeqModel(pl.LightningModule):
         if self.regression:
             try:
                 r2 = sklearn.metrics.r2_score(targets, preds)
+                mse = sklearn.metrics.mean_squared_error(targets, preds)
+                rmse = np.sqrt(mse)
+                mae = sklearn.metrics.mean_absolute_error(targets, preds)
             except ValueError:
                 print("ValueError: r2_score")
                 print(targets.shape, preds.shape)
                 print(np.isinf(targets).sum(), np.isinf(preds).sum())
                 print(np.isnan(targets).sum(), np.isnan(preds).sum())
                 print(targets, preds)
-                quit()
-            mse = sklearn.metrics.mean_squared_error(targets, preds)
-            rmse = np.sqrt(mse)
-            mae = sklearn.metrics.mean_absolute_error(targets, preds)
+
+                # to stop training, raise a KeyboardInterrupt
+                raise KeyboardInterrupt
+
+            
             self.log("val_r2", r2, on_epoch=True, prog_bar=True)
             self.log("val_mse", mse, on_epoch=True, prog_bar=True)
             self.log("val_rmse", rmse, on_epoch=True, prog_bar=True)
@@ -253,7 +267,9 @@ def load_gpt_model(name):
     elif name == "gpt2":
         from transformers import GPT2LMHeadModel, GPT2Tokenizer
         gpt_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        gpt_model = GPT2LMHeadModel.from_pretrained('gpt2', pad_token_id=gpt_tokenizer.eos_token_id)        
+        gpt_model = GPT2LMHeadModel.from_pretrained('gpt2', pad_token_id=gpt_tokenizer.eos_token_id)     
+           
+        
     gpt_model = gpt_model.to(device)
     return gpt_model, gpt_tokenizer
 
@@ -284,13 +300,17 @@ class LitGPT(LitSeqModel):
     def __init__(self, *args, 
                  gpt_name="gpt2",
                  mode="train_mlp_norm",
+                 pretrained=True,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.gpt_name = gpt_name
         # load model
         self.model, self.tokenizer = load_gpt_model(gpt_name)
+        # re-init weights if not using pretrained
+        if not pretrained:
+            self.model.init_weights()  #.apply(self.model._init_weights)
         if mode == "adapters":
-            self.model.add_adapter("icp", config=None, overwrite_ok = False, set_active=True)
+            self.model.add_adapter("icp", config=None, overwrite_ok=False, set_active=True)
         # freeze some params
         apply_train_mode_gpt(mode, self.model)
         # get width

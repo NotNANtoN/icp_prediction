@@ -19,6 +19,7 @@ def get_mean_train_target(data_module):
     return np.concatenate([pat[~torch.isnan(pat)].numpy() for pat in data_module.train_ds.targets]).mean()
 
 
+@torch.inference_mode()
 def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
     # Eval model
     # prep
@@ -51,8 +52,7 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
         inputs = inputs.to("cuda")
         targets = targets.to("cuda")
         # pred
-        with torch.no_grad():
-            preds = model(inputs)
+        preds = model(inputs)
         # loss
         loss = model.loss_func(preds, targets)
         # other details
