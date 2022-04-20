@@ -104,6 +104,7 @@ def make_pred_df_xgb(model, data_module, regression, dl_type="test", dl=None, ca
     ids = dl.dataset.ids
     steps = dl.dataset.steps
     # predict
+    print(regression, inputs.shape, targets.shape)
     if regression:
         preds = model.predict(inputs)
     else:

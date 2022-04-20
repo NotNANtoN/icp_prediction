@@ -404,8 +404,9 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.feature_names = list(data[0].drop(columns=["target"]).columns)
         
         lens = [len(pat) for pat in self.raw_inputs]
-        self.ids = np.concatenate([[i] * lens[i] for i in range(len(lens))])
-        self.steps = np.concatenate([np.arange(lens[i]) for i in range(len(lens))])
+        max_len = 99999999 if self.max_len == 0 else self.max_len
+        self.ids = np.concatenate([([i] * lens[i])[:max_len] for i in range(len(lens))])
+        self.steps = np.concatenate([np.arange(lens[i])[:max_len] for i in range(len(lens))])
         
         self.all_preprocessed = False
 
@@ -560,4 +561,4 @@ class SequenceDataset(torch.utils.data.Dataset):
             flat_block_size = self.flat_block_size
         max_len = 0 if self.train else self.max_len
         self.flat_inputs = make_flat_inputs(self.inputs, self.flat_block_size, fill_type, median, max_len)
-        self.flat_targets = np.concatenate([data for data in self.targets], axis=0)
+        self.flat_targets = np.concatenate([data[:max_len] if max_len > 0 else data for data in self.targets], axis=0)

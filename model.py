@@ -59,7 +59,7 @@ class LitSeqModel(pl.LightningModule):
             from nan_emb import NanEmbed
             emb_size = self.nan_embed_size
             self.embed = NanEmbed(self.num_inputs, emb_size)
-            self.embed = torch.jit.script(self.embed)
+            #self.embed = torch.jit.script(self.embed)
 
             if self.freeze_nan_embed:
                 for p in self.embed.parameters():
