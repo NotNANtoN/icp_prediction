@@ -17,7 +17,7 @@ random_starts: True
 
 # nan embed
 freeze_nan_embed: 0
-norm_nan_embed: False
+norm_nan_embed: 1
 nan_embed_size: 512
 
 subsample_frac: 1.0
@@ -55,8 +55,13 @@ mode: "adapters"  # "train_mlp_norm",  "train_norm", "freeze" (does not train)
 # clip params
 clip_name: "ViT-B/16"
 # gpt params
-gpt_name: "gpt2"  # gpt2, neo1.3, neo2.7
+gpt_name: "gpt2"  # gpt2, neo1.3, neo2.7     "gpt2",
+#    "gpt2-medium",
+#    "gpt2-large",
+#    "gpt2-xl",
+#    "distilgpt2",
 pretrained: 1
+reduction_factor: 16
 # classical model args
 flat_block_size: 8
 #linear

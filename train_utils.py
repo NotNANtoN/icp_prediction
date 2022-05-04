@@ -83,6 +83,7 @@ def create_model(model_type, data_module, cfg):
                        gpt_name=cfg["gpt_name"],
                        mode=cfg["mode"],
                        pretrained=cfg["pretrained"],
+                       reduction_factor=cfg["reduction_factor"],
                        **general_kwargs)
     else:
         raise ValueError("Unknown model_type: " + str(model_type))

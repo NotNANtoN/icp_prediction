@@ -266,6 +266,7 @@ def load_gpt_model(name):
         gpt_model = GPTNeoForCausalLM.from_pretrained("EleutherAI/gpt-neo-2.7B", pad_token_id=gpt_tokenizer.eos_token_id)
     elif name == "gpt2":
         from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
         gpt_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
         gpt_model = GPT2LMHeadModel.from_pretrained('gpt2', pad_token_id=gpt_tokenizer.eos_token_id)     
            
@@ -301,6 +302,7 @@ class LitGPT(LitSeqModel):
                  gpt_name="gpt2",
                  mode="train_mlp_norm",
                  pretrained=True,
+                 reduction_factor=16,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.gpt_name = gpt_name
@@ -310,7 +312,20 @@ class LitGPT(LitSeqModel):
         if not pretrained:
             self.model.init_weights()  #.apply(self.model._init_weights)
         if mode == "adapters":
-            self.model.add_adapter("icp", config=None, overwrite_ok=False, set_active=True)
+            import transformers
+            config = transformers.PfeifferConfig(mh_adapter=False, output_adapter = True,
+                                                 reduction_factor = reduction_factor,
+                                                 non_linearity = 'relu', original_ln_before = True, original_ln_after = True,
+                                                  ln_before = False, ln_after = False, init_weights = 'bert', is_parallel = False,
+                                                   scaling = 1.0, residual_before_ln = True, adapter_residual_before_ln = False,
+                                                    inv_adapter = None, inv_adapter_reduction_factor= None, cross_adapter = False,
+                                                     phm_layer = False, phm_dim = 4, factorized_phm_W = True,
+                                                      shared_W_phm = False, shared_phm_rule = True, factorized_phm_rule = False,
+                                                       phm_c_init = 'normal', phm_init_range = 0.0001, learn_phm = True,
+                                                        hypercomplex_nonlinearity= 'glorot-uniform', phm_rank = 1, phm_bias = True)
+            self.model.add_adapter("icp", config=config, overwrite_ok=False, set_active=True)
+            self.model.train_adapter("icp")
+
         # freeze some params
         apply_train_mode_gpt(mode, self.model)
         # get width
@@ -319,13 +334,16 @@ class LitGPT(LitSeqModel):
         self.input_mapping = torch.nn.Linear(self.num_recurrent_inputs + self.num_static_inputs, self.width)
         self.out_mapping = torch.nn.Linear(self.width, 1)
         # replace output layer by our newly initialized one
-        #model.model.transformer.wte = in_mapping
+        #self.model.transformer.wte = self.input_mapping
         self.model.lm_head = self.out_mapping
         
     def make_preds(self, x, lens=None):
         # x = [BS, seq_len, feats]
+        
         x = self.input_mapping(x)
         x = self.model(inputs_embeds=x)["logits"]
+        
+        #x = self.model(x)["logits"]
         return x
 
         

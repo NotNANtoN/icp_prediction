@@ -44,10 +44,11 @@ def main(cfg):
     path = f"data/DB_{cfg['db_name']}_{cfg['minutes']}_final_df.pkl"
     df = pd.read_pickle(path)
 
-    from tune_hebo import get_hebo_space, tune_hebo
+    
 
     # run hebo tuning if wanted
     if cfg["tune_hebo"]:
+        from tune_hebo import get_hebo_space, tune_hebo
         space = get_hebo_space(cfg["model_type"])
         tune_hebo(df, space, cfg)
 
