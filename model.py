@@ -264,11 +264,11 @@ def load_gpt_model(name):
         from transformers import GPTNeoForCausalLM, GPT2Tokenizer
         gpt_tokenizer = GPT2Tokenizer.from_pretrained("EleutherAI/gpt-neo-2.7B")
         gpt_model = GPTNeoForCausalLM.from_pretrained("EleutherAI/gpt-neo-2.7B", pad_token_id=gpt_tokenizer.eos_token_id)
-    elif name == "gpt2":
+    elif "gpt2" in name:
         from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
-        gpt_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        gpt_model = GPT2LMHeadModel.from_pretrained('gpt2', pad_token_id=gpt_tokenizer.eos_token_id)     
+        gpt_tokenizer = GPT2Tokenizer.from_pretrained(name)
+        gpt_model = GPT2LMHeadModel.from_pretrained(name, pad_token_id=gpt_tokenizer.eos_token_id)     
            
         
     gpt_model = gpt_model.to(device)

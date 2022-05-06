@@ -107,14 +107,17 @@ def seq_pad_collate(batch):
 
 
 def make_flat_inputs(inputs, flat_block_size, fill_type, median, max_len, targets=None):
+    # clip max len
+    if max_len > 0:
+        inputs = [seq[:max_len] for seq in inputs]
+
     if flat_block_size > 0:
         # make blocks
         num_feats = inputs[0].shape[-1]
         all_blocks = []
         for pat_idx, pat in enumerate(inputs):
             pat = pat.numpy()
-            if max_len > 0:
-                pat = pat[:max_len]
+           
             for time_idx in range(len(pat)):
                 # skip block for training if targets are given
                 if targets is not None and np.isnan(targets[pat_idx][time_idx]):
@@ -132,7 +135,8 @@ def make_flat_inputs(inputs, flat_block_size, fill_type, median, max_len, target
                         pad_prefix = np.full((size_diff, num_feats), median)
                     block = np.concatenate([pad_prefix, block], axis=0)
                 # make flat
-                block = block.reshape(-1)
+                block = block.reshape(-1).copy()
+
                 all_blocks.append(block)
         inputs = np.stack(all_blocks)
     else:
@@ -421,12 +425,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         if self.train:
             if self.block_size:
                 total_len = self.block_size
-                if self.train:
-                    start_idx = random.randint(0, seq_len - total_len) if seq_len > total_len else 0
-                    end_idx = start_idx + total_len
-                else:
-                    start_idx = 0
-                    end_idx = len(x)
+                start_idx = random.randint(0, seq_len - total_len) if seq_len > total_len else 0
+                end_idx = start_idx + total_len
                 
                 x = x[start_idx: end_idx]
                 y = y[start_idx: end_idx]
@@ -502,7 +502,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.inputs = [self.fill_pat(pat, median, fill_type) for pat in self.inputs]
         
     def fill_pat(self, pat, median, fill_type):
-        if fill_type == "none":
+        if fill_type is None or fill_type == "none":
             return pat
         
         pat = pat.numpy().astype(np.float32)

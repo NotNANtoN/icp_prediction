@@ -59,8 +59,11 @@ def main(cfg):
 
     
     study = optuna.create_study(direction="maximize")  # Create a new study.
+    print("Setup dm...")
+    from tune_utils import setup_dm
+    dm = setup_dm(df, cfg)
     print("Start tuning...")
-    study.optimize(lambda study: objective_optuna(study, df, cfg), 
+    study.optimize(lambda study: objective_optuna(study, df, cfg, dm=dm), 
                    n_trials=cfg["opt_steps"], gc_after_trial=True,
                    show_progress_bar=True,
                    )

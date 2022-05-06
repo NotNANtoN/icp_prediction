@@ -14,7 +14,7 @@ from data_utils import SeqDataModule
 from eval_utils import get_all_dfs
 
 
-def obj(df, cfg, opt_object, num_seeds=3, split="val"):
+def obj(df, cfg, opt_object, num_seeds=3, split="val", dm=None):
     # put in op_df
     cfg = copy.deepcopy(cfg)
     if isinstance(opt_object, pd.DataFrame):
@@ -24,12 +24,12 @@ def obj(df, cfg, opt_object, num_seeds=3, split="val"):
     cfg = merge_params_in_cfg(cfg, opt_dict)
     # calculate metrics for number of seeds
     if num_seeds is None:
-        metric = train_and_eval_model(df, cfg, split=split, log=False)
+        metric = train_and_eval_model(df, cfg, split=split, log=False, dm=dm)
     else:
         metrics = []
         for seed in range(num_seeds):
             cfg["seed"] = seed
-            metrics.append(train_and_eval_model(df, cfg, split=split, log=False))
+            metrics.append(train_and_eval_model(df, cfg, split=split, log=False, dm=dm))
         metric = np.mean(metrics)
     return metric
 
@@ -57,8 +57,12 @@ def scale_hyperparameters(opt_df):
     return opt_df
 
 
-def train_and_eval_model(df, cfg, split, log=True):
-    dm, models, trainers = setup_dm_and_train(df, cfg, log=log)
+def train_and_eval_model(df, cfg, split, log=True, dm=None):
+    #setup dm
+    if dm is None:
+        dm = setup_dm(df, cfg)
+    # train model on datamodule
+    models, trainers = train_model(cfg["model_type"], [dm], cfg, verbose=False, log=log)
     metric = eval_model(dm, models, trainers, cfg["model_type"], split)
     return metric
 
@@ -230,15 +234,15 @@ def save_study_results(study, folder_name, model_type):
 
 def suggest_deep_learning(trial: optuna.trial.Trial):
     # suggest hyperparameters for deep learning models
-    rec = {'lr': trial.suggest_loguniform("lr", 0.00005, 0.01),
+    rec = {'lr': trial.suggest_loguniform("lr", 1e-5, 1e-3),
             #'min_len': trial.suggest_int("min_len", 2, 128),
             #'train_noise_std': trial.suggest_float("train_noise_std", 0.001, 0.2),
             #'weight_decay': trial.suggest_float("weight_decay", 0.001, 0.4),
             #'grad_clip_val': trial.suggest_float("grad_clip_val", 0.1, 5.0),   
             #'train_noise_std': trial.suggest_int("train_noise_std", 0, 2),
-            'weight_decay': trial.suggest_discrete_uniform("weight_decay", 0.0, 4.0, 0.1),
-            'grad_clip_val': trial.suggest_discrete_uniform("grad_clip_val", 0, 2.0, 0.1), 
-            'bs': trial.suggest_int("bs", 2, 6),
+            'weight_decay': trial.suggest_discrete_uniform("weight_decay", 0.0, 0.4, 0.02),
+            'grad_clip_val': trial.suggest_discrete_uniform("grad_clip_val", 0, 1.5, 0.1), 
+            
             #'fill_type': trial.suggest_categorical("fill_type", ["median", "none"]),
             #'max_epochs': trial.suggest_int("max_epochs", 5, 100),
             }
@@ -264,10 +268,24 @@ def suggest_logreg(trial):
            'l1_ratio': trial.suggest_discrete_uniform("l1_ratio", 0.0, 1.0, 0.05),}
     return rec
 
-def objective_optuna(trial: optuna.Trial, df, cfg):
+def objective_optuna(trial: optuna.Trial, df, cfg, dm=None):
     # Invoke suggest methods of a Trial object to generate hyperparameters.
     if cfg["model_type"] in ["rnn", "gpt", "mlp"]:
         rec = suggest_deep_learning(trial)
+        if cfg["model_type"] == "gpt":
+            if cfg["gpt_name"] == "gpt2":
+                rec["bs"] =  6 #trial.suggest_int("bs", 2, 6)
+            elif cfg["gpt_name"] == "gpt2-medium":
+                rec["bs"] =  4 #trial.suggest_int("bs", 2, 4)
+            elif cfg["gpt_name"] == "gpt2-large":
+                rec["bs"] =  3 # trial.suggest_int("bs", 2, 3)
+            elif cfg["gpt_name"] == "gpt2-xl":
+                rec["bs"] = 0
+            elif cfg["gpt_name"] == "distilgpt2":
+                rec["bs"] =  7 #trial.suggest_int("bs", 2, 7)
+        else:
+            rec["bs"] =  trial.suggest_int("bs", 2, 8)
+        
     else:
         if cfg["model_type"] in ("xgb", "rf"):
             rec = suggest_tree(trial)
@@ -277,7 +295,7 @@ def objective_optuna(trial: optuna.Trial, df, cfg):
         if cfg["flat_block_size_range"] > 1:
             rec["flat_block_size"] =  trial.suggest_discrete_uniform("flat_block_size", 0, cfg["flat_block_size_range"], 1)
         else:
-            rec["flat_block_size"] = 1
-    score = obj(df, cfg, rec)
+            rec["flat_block_size"] = cfg["flat_block_size"]
+    score = obj(df, cfg, rec, num_seeds=cfg["num_seeds"], dm=dm)
     return score  
 
