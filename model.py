@@ -27,7 +27,7 @@ class LitSeqModel(pl.LightningModule):
         self.norm_nan_embed = norm_nan_embed
         
         # get feature names
-        feature_names = self.data_module.feature_names
+        feature_names = self.data_module.train_ds.feature_names
         
         if use_static:
             # save idcs of static idcs to have separate streams in model
@@ -129,8 +129,8 @@ class LitSeqModel(pl.LightningModule):
             except ValueError:
                 print("ValueError: r2_score")
                 print(targets.shape, preds.shape)
-                print(np.isinf(targets).sum(), np.isinf(preds).sum())
-                print(np.isnan(targets).sum(), np.isnan(preds).sum())
+                print("Inf target preds:", np.isinf(targets).sum(), np.isinf(preds).sum())
+                print("Nan target preds: ", np.isnan(targets).sum(), np.isnan(preds).sum())
                 print(targets, preds)
 
                 # to stop training, raise a KeyboardInterrupt

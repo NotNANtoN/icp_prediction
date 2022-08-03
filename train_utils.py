@@ -52,9 +52,12 @@ def create_dm(df, cfg):
                         flat_block_size=cfg["flat_block_size"],
                         target_nan_quantile=cfg["target_nan_quantile"],
                         target_clip_quantile=cfg["target_clip_quantile"],
+                        input_nan_quantile=cfg["input_nan_quantile"],
+                        input_clip_quantile=cfg["input_clip_quantile"],
                         block_size=cfg["block_size"],
                         subsample_frac=cfg["subsample_frac"],
                         randomly_mask_aug=cfg["randomly_mask_aug"],
+                        agg_meds=cfg["agg_meds"],
                         )
     dm.setup()
     return dm
@@ -186,7 +189,7 @@ def create_trainer(cfg, verbose=True, log=True):
                         logger=wandb_logger,
                         gpus=1,
                         #val_check_interval=100,#cfg["val_check_interval"],
-                        auto_lr_find=False,
+                        auto_lr_find=cfg["auto_lr_find"],
                         **verbose_kwargs,
                         #overfit_batches=1,
                         #limit_val_batches=0.0
@@ -208,6 +211,27 @@ def train_nn(model_type, data_module, cfg, verbose=True, log=True):
     # track gradients etc
     if verbose:
         trainer.logger.watch(model)
+        
+    if cfg["auto_lr_find"]:
+        #trainer.tune(model, data_module.train_dataloader())
+        # Run learning rate finder
+        lr_finder = trainer.tuner.lr_find(model, data_module.train_dataloader(), min_lr=1e-6, max_lr=1e-2)
+
+        # Results can be found in
+        print(lr_finder.results)
+
+        # Plot with
+        fig = lr_finder.plot(suggest=True)
+        fig.show()
+
+        # Pick point based on plot, or get suggestion
+        new_lr = lr_finder.suggestion()
+
+        # update hparams of the model
+        #model.hparams.lr = new_lr
+        model.lr = new_lr
+
+        
     # do actual training
     trainer.fit(model, data_module)
     wandb.finish(quiet=True)

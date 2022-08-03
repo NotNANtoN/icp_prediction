@@ -61,7 +61,6 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
                 dl.dataset.inputs = [model.data_module.preprocess(pat) for pat in dl.dataset.raw_inputs]
             dl.dataset.was_normed = True
         
-    
     # make preds
     for inputs, targets, lens in dl:
         bs = inputs.shape[0]
@@ -324,6 +323,6 @@ def get_all_dfs(models, trainers, model_type, regression, dl_type="test", dl=Non
         print(df["mean_train_target"].mean())
     df = pd.concat(dfs)
     if model_type not in classical_models:
-        df["preds"] *= df["std_train_target"]
-        df["targets"] *= df["std_train_target"]
+        df["preds"] = (df["std_train_target"] * df["preds"]) + df["mean_train_target"]
+        df["targets"] = (df["std_train_target"] * df["targets"]) + df["mean_train_target"]
     return df

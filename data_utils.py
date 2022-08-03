@@ -1,16 +1,13 @@
-from dataclasses import dataclass
 import math
 import random
 from typing import Optional
-from sklearn import preprocessing
-from sklearn.semi_supervised import SelfTrainingClassifier
 
 import torch
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
+from torch.nn.utils.rnn import pad_sequence
 import pytorch_lightning
 import numba
 
@@ -178,19 +175,56 @@ def ema_fill_mask(pat: np.ndarray, ema_val: float, mean: np.ndarray):
 
 
 class Preprocessor():
-    def __init__(self, fill_type) -> None:
+    def __init__(self, fill_type, agg_meds, input_nan_quantile,
+                 input_clip_quantile) -> None:
         self.fill_type = fill_type
+        self.agg_meds = agg_meds
+        self.med_mapping = None
+        self.input_nan_quantile = input_nan_quantile
+        self.input_clip_quantile = input_clip_quantile
+        if self.agg_meds:
+            import json
+            with open("data/measure_norm_mapping_dict.json", "r") as f:
+                self.med_mapping = json.load(f)
     
     def fit(self, df: pd.DataFrame, input_cols) -> None:
         X, y = df[input_cols], df["target"]
-          # clamp extremas according to pre-calculated vals and store them
+        
+        self.feature_names = input_cols
+        if self.med_mapping is not None:
+            # map single meds to their med group. First divide each by their individual std, then sum up
+            self.all_med_names = []
+            for group_name, names in self.med_mapping.items():
+                # add _Med as suffix to all med names
+                names = [name + "_Med" for name in names]
+                names = [n for n in names if n in self.feature_names]
+                
+                self.med_mapping[group_name] = names
+                if len(names) > 0:
+                    self.all_med_names.extend(names)
+            # clean empty groups
+            for group_name in list(self.med_mapping.keys()):
+                if len(self.med_mapping[group_name]) == 0:
+                    del self.med_mapping[group_name]
+            # get std
+            self.med_stds = X[self.all_med_names].std(axis=0)
+            # apply
+            X = self.apply_med_agg(X)
+            # redo feature_names
+            self.feature_names = X.columns
+                        
+        # clamp extremas according to pre-calculated vals and store them
         # calc quantiles according to train data
-        self.upper_quants = torch.tensor(X.quantile(0.9999))
-        self.lower_quants = torch.tensor(X.quantile(1 - 0.9999))
-
+        self.upper_quants_nan = (X.quantile(self.input_nan_quantile, axis=0)).to_numpy()
+        self.upper_quants_clip = (X.quantile(self.input_clip_quantile, axis=0)).to_numpy()
+        self.lower_quants_nan = (X.quantile(1 - self.input_nan_quantile, axis=0)).to_numpy()
+        self.lower_quants_clip = (X.quantile(1 - self.input_clip_quantile, axis=0)).to_numpy()
+        # apply clipping to train data
+        X_nan_clipped = self.apply_quants((X.to_numpy()))
+                
         # calc mean, median, std
-        self.mean, self.median, self.std = X.mean(), X.median(), X.std()
-        self.mean, self.median, self.std = (torch.tensor(x).float() for x in (self.mean, self.median, self.std))
+        self.mean, self.median, self.std = np.nanmean(X_nan_clipped, axis=0), np.nanmedian(X_nan_clipped, axis=0), np.nanstd(X_nan_clipped, axis=0)
+        #self.mean, self.median, self.std = (torch.tensor(x).float() for x in (self.mean, self.median, self.std))
         self.mean_train_target = y.mean()
         self.mean_train_target_pat = df.groupby("Pat_ID").apply(lambda pat: pat["target"].mean()).mean()
         
@@ -230,9 +264,26 @@ class Preprocessor():
     
         
     def transform(self, pat):
-        pat = pat.clip(self.lower_quants, self.upper_quants)
+        pat = self.apply_med_agg(pat)
+        pat = self.apply_quants(pat)
         pat = self.fill_pat(pat)
         pat = (pat -  self.mean) / self.std
+        return torch.from_numpy(pat.to_numpy())
+    
+    def apply_med_agg(self, pat):
+        if self.med_mapping is not None:
+            # divide by std
+            pat[self.all_med_names] = pat[self.all_med_names].copy() / self.med_stds
+            # create new columns with mean of meds
+            for med_name, med_names in self.med_mapping.items():
+                pat[med_name] = pat[med_names].mean(axis=1).copy()
+            # delete old columns
+            pat = pat.drop(columns=self.all_med_names)
+        return pat
+    
+    def apply_quants(self, pat):
+        pat[(pat > self.upper_quants_nan) | (pat < self.lower_quants_nan)] = np.nan
+        pat = pat.clip(self.lower_quants_clip, self.upper_quants_clip)
         return pat
     
     def transform_target(self, target):
@@ -242,12 +293,12 @@ class Preprocessor():
         self.fit(X, y)
         return self.transform(X)
     
-    def fill_pat(self, pat):
+    def fill_pat(self, pat: pd.DataFrame):
         if self.fill_type is None or self.fill_type == "none":
             return pat
         
-        pat = pat.numpy().astype(np.float32)
-        median = self.median.numpy().astype(np.float32)
+        #pat = pat.numpy().astype(np.float32)
+        median = self.median#.numpy().astype(np.float32)
         
         nan_mask = np.isnan(pat)
         if self.fill_type == "pat_median":
@@ -268,13 +319,19 @@ class Preprocessor():
             ema_val = 0.3
             pat = ema_fill_mask(pat, ema_val, median)
 
-        pat = torch.from_numpy(pat)
-        median = torch.from_numpy(median)
         # always fill remaining NaNs with the median
-        nan_mask = torch.isnan(pat)
-        pat[nan_mask] = median.repeat(pat.shape[0], 1)[nan_mask]
+        # first extend median to same shape as pat
         
-        assert torch.isnan(pat).sum() == 0, "NaNs still in tensor after filling!"
+        median_series = pd.Series(median, index=pat.columns)
+        #print("Median: ", median_series)
+        pat = pat.fillna(median_series)
+       
+        #median_filled = np.expand_dims(median, 0).repeat(pat.shape[0], axis=0)  
+      
+        #nan_mask = torch.isnan(pat)
+        #pat[nan_mask] = median.repeat(pat.shape[0], 1)[nan_mask]
+        
+        assert pat.isna().sum().sum() == 0, "NaNs still in tensor after filling!"
         return pat
     
 
@@ -286,10 +343,13 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
                  target_name = "ICP_Vital", 
                  target_nan_quantile=0,
                  target_clip_quantile=0,
+                 input_nan_quantile=0,
+                 input_clip_quantile=0,
                  block_size=0,
                  max_len=0,
                  subsample_frac=1.0,
                  randomly_mask_aug=0.0,
+                 agg_meds=False,
                 ):
         super().__init__()
         
@@ -371,7 +431,9 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
         input_cols = [col for col in train_data.columns if col not in non_input_cols]
         
         # create preprocessor and fit on train data
-        self.preprocessor = Preprocessor(fill_type)
+        self.preprocessor = Preprocessor(fill_type, agg_meds, input_nan_quantile=input_nan_quantile,
+                 input_clip_quantile=input_clip_quantile)
+        
         self.preprocessor.fit(train_data, input_cols)
 
         # create datasets
@@ -385,7 +447,8 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
                                         target_nan_quantile=self.target_nan_quantile,
                                         target_clip_quantile=self.target_clip_quantile,
                                         subsample_frac=subsample_frac,
-                                        randomly_mask_aug=randomly_mask_aug) if train_data is not None else None
+                                        randomly_mask_aug=randomly_mask_aug,
+                                        preprocessor=self.preprocessor) if train_data is not None else None
         self.val_ds = SequenceDataset(val_data, train=False, random_starts=False, block_size=0, 
                          train_noise_std=0.0, flat_block_size=self.flat_block_size,
                                      max_len=self.max_len,) if val_data is not None else None
@@ -414,8 +477,9 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
                 # apply preprocessor
                 ds.inputs = [self.preprocessor.transform(pat) for pat in ds.raw_inputs]
                 ds.targets = [self.preprocessor.transform_target(t) for t in ds.raw_targets]
-
                 ds.make_flat_arrays(self.preprocessor.fill_type, self.preprocessor.median, flat_block_size=self.flat_block_size)
+                ds.feature_names = self.preprocessor.feature_names
+                self.feature_names = ds.feature_names
             # done
             self.setup_completed = True
              
@@ -435,7 +499,7 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
 class SequenceDataset(torch.utils.data.Dataset):
     def __init__(self, data, train, random_starts=1, block_size=0, min_len=10, train_noise_std=0.1, 
                  flat_block_size=0, target_nan_quantile=0, target_clip_quantile=0, max_len=0, 
-                 subsample_frac=1.0, randomly_mask_aug=0):
+                 subsample_frac=1.0, randomly_mask_aug=0, preprocessor=None):
         self.random_starts = random_starts
         self.min_len = min_len
         self.max_len = max_len
@@ -446,6 +510,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.target_nan_quantile = target_nan_quantile
         self.subsample_frac = subsample_frac
         self.randomly_mask_aug = randomly_mask_aug
+        self.preprocessor = preprocessor
         
         if train:
             if target_nan_quantile > 0:
@@ -472,7 +537,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         # subsample part of patients
         if subsample_frac < 1.0:
             data = [data[i] for i in np.random.choice(range(len(data)), int(len(data) * subsample_frac), replace=False)]
-        self.raw_inputs = to_torch([p.drop(columns=["target"]) for p in data])
+        self.raw_inputs = ([p.drop(columns=["target"]) for p in data])
         self.raw_targets = to_torch([p["target"] for p in data])
         
         self.feature_names = list(data[0].drop(columns=["target"]).columns)
@@ -515,7 +580,9 @@ class SequenceDataset(torch.utils.data.Dataset):
             mask = torch.rand(x.shape, device=x.device, dtype=x.dtype) < self.randomly_mask_aug
             x[mask] = torch.nan
             # fill 
-            x = self.fill_pat(x, self.median, self.fill_type)
+            x = pd.DataFrame(x.numpy(), columns=self.feature_names)
+            x = self.preprocessor.fill_pat(x)
+            x = torch.from_numpy(x.to_numpy())
             
         return x.float(), y.float()
         
