@@ -11,8 +11,53 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 #from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 import wandb
 
-from data_utils import do_fold
+from data_utils import do_fold, SeqDataModule
 
+def make_train_val_fold(df, cfg, folds, test_df=None):
+    dms = []
+    if folds > 0:
+        pat_list = [pat[1] for pat in df.groupby("Pat_ID")]
+        
+        from data_utils import make_fold
+        train_data_list, val_data_list, train_idcs_list, val_idcs_list = make_fold(pat_list, k=folds)
+        
+        for val_data, train_data in zip(train_data_list, val_data_list):
+            train_df = pd.concat(train_data)
+            train_df["split"] = "train"
+            val_df = pd.concat(val_data)
+            val_df["split"] = "val"
+            df_list = [train_df, val_df]
+            if test_df is not None:
+                test_df["split"] = "test"
+                df_list.append(test_df)
+            df = pd.concat(df_list)
+        
+            dm = create_dm(df, cfg)
+            dms.append(dm)
+    else:
+        dm = create_dm(df, cfg)
+        dms.append(dm)
+    return dms
+
+
+def create_dm(df, cfg):
+    dm = SeqDataModule(df,
+                        target_name=cfg["target_name"],
+                        random_starts=cfg["random_starts"], 
+                        min_len=cfg["min_len"], 
+                        max_len=cfg["max_len"],
+                        train_noise_std=cfg["train_noise_std"], 
+                        batch_size=cfg["bs"], 
+                        fill_type=cfg["fill_type"], 
+                        flat_block_size=cfg["flat_block_size"],
+                        target_nan_quantile=cfg["target_nan_quantile"],
+                        target_clip_quantile=cfg["target_clip_quantile"],
+                        block_size=cfg["block_size"],
+                        subsample_frac=cfg["subsample_frac"],
+                        randomly_mask_aug=cfg["randomly_mask_aug"],
+                        )
+    dm.setup()
+    return dm
 
 def retrain(dev_data, test_data, best_params, cfg, verbose=True):
     # create splits
@@ -100,8 +145,6 @@ def create_trainer(cfg, verbose=True, log=True):
     #    experiment_name='default', 
     #)
     
-    from pytorch_lightning.loggers import WandbLogger
-
     if log:
         wandb_logger = pl.loggers.WandbLogger(name=None, save_dir=None, offline=False, id=None,
                                               anonymous=None, version=None, project=cfg["target_name"],
@@ -122,7 +165,7 @@ def create_trainer(cfg, verbose=True, log=True):
     callbacks = []
     # verbosity
     verbose_kwargs = {"enable_progress_bar": True if verbose else False,
-                      "weights_summary": "top" if verbose else None
+                      "enable_model_summary": True if verbose else False,
                      }
     if not verbose:
         logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)

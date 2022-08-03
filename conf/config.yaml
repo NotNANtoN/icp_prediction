@@ -4,16 +4,23 @@ target_name: "ICP_Vital"   # ICP_Vital" , long_icp_hypertension_2,
 db_name: "UKE"  # "UKE", "MIMIC"
 minutes: 60
 
+outer_folds: 3
+inner_folds: 4
+
+
 # data args
 seed: 2
 #norm_method:  # z, or none
 features:
 fill_type: "median" # "pat_mean", "median", "pat_ema" "pat_ema_mask"
 target_nan_quantile: 0.9999
+target_clip_quantile: 0.999
 # do not tune
 #k_fold: 0
 #num_splits: 3
 random_starts: True
+
+randomly_mask_aug: 0.0
 
 # nan embed
 freeze_nan_embed: 0
@@ -25,7 +32,7 @@ subsample_frac: 1.0
 # augmentations
 train_noise_std: 0.01
 bs: 8 # 8 best for rnn
-max_len: 512
+max_len: 1024
 min_len: 0
 block_size: 128
 

@@ -140,7 +140,9 @@ def get_baseline(ds, ig, pat_id=None, median_baseline=False, median_step_baselin
     return baseline_data.float().unsqueeze(0).to(device)
         
 
-def get_all_attrs(model, absolute=False, target_idx=None, desired_target_val=None, perc=None, agg=True, ds=None, ig=False, median_baseline=False, median_step_baseline=False, num_baselines=1, sg_std=0.01, zero_baseline=False, noise_tunnel=True):
+def get_all_attrs(model, absolute=False, target_idx=None, desired_target_val=None, perc=None, agg=True, ds=None,
+                  ig=False, median_baseline=False, median_step_baseline=False, num_baselines=1, sg_std=0.01,
+                  zero_baseline=False, noise_tunnel=True, max_len=0):
     if ds is None:
         ds = model.val_dataloader().dataset
     ids = range(len(ds.inputs))
@@ -160,7 +162,7 @@ def get_all_attrs(model, absolute=False, target_idx=None, desired_target_val=Non
                 baseline_data = get_baseline(ds, ig, pat_id=pat_id)
             
             attr = get_attr_single(model, pat_id, absolute=absolute, target_idx=target_idx, ds=ds, ig=ig, 
-                                   baseline_data=baseline_data, sg_std=sg_std,noise_tunnel=noise_tunnel)
+                                   baseline_data=baseline_data, sg_std=sg_std,noise_tunnel=noise_tunnel, max_len=max_len)
             pat_attrs.append(attr)
         
         attr = np.mean(pat_attrs, axis=0)
@@ -175,48 +177,63 @@ def get_all_attrs(model, absolute=False, target_idx=None, desired_target_val=Non
     return attrs
 
 
-def get_attr_single(model, pat_id, absolute=False, target_idx=None, ds=None, ig=False, baseline_data=None, sg_std=0.01, noise_tunnel=True):
+def get_attr_single(model, pat_id, absolute=False, target_idx=None, ds=None, ig=False, 
+                    baseline_data=None, sg_std=0.01, noise_tunnel=True, max_len=0):
     if ds is None:
         ds = model.val_dataloader().dataset
-    pat_data, pat_target = ds[pat_id]
-    pat_len = len(pat_data)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     model.to(device)
-    pat_data = pat_data.unsqueeze(0).to(device)
     if target_idx is None:
         target_idx = 0
     model = get_sal_model(model, target_idx, noise_tunnel=noise_tunnel, ig=ig)
-    
-    pat_data.requires_grad=True
-    # check if we need to cut or pad the baseline data if we have some
-    if ig and baseline_data is not None:
-        pat_len = pat_data.shape[1]
-        if baseline_data.shape[1] > pat_len:
-            # cut to pat_data len
-            baseline_data = baseline_data[:, :pat_len, :]
-        elif baseline_data.shape[1] < pat_len:
-            # pad by repeating last timestep of baseline
-            pad_by = pat_data.shape[1] - baseline_data.shape[1]
-            num_feats = pat_data.shape[-1]
-            last_bl_step = baseline_data[:, -1, :].unsqueeze(1)
-            pad_tensor = torch.ones(1, pad_by, num_feats, device=pat_data.device) * last_bl_step
-            baseline_data = torch.cat([baseline_data, pad_tensor], dim=1)                                
-    # set attribution call kwargs
-    attr_kwargs = {}
-    if noise_tunnel:
-        attr_kwargs["nt_samples"] = 50
-        attr_kwargs["nt_type"] = "smoothgrad"
-        attr_kwargs["stdevs"] = sg_std
-    if ig:
-        attr_kwargs["n_steps"] = 50
-        attr_kwargs["baselines"] = baseline_data
-        attr_kwargs["internal_batch_size"] = 256
+        
+        
+    pat_data, _ = ds[pat_id]
+    if max_len > 0:
+        pat_data_chunks = torch.split(pat_data, max_len, dim=0)
     else:
-        attr_kwargs["abs"] = absolute
-    # calc attribution
-    attrs = model.attribute(pat_data, **attr_kwargs)
-    attrs = attrs.detach().cpu().squeeze(0).numpy()
+        pat_data_chunks = [pat_data]
+    
+    
+    all_attrs = []
+    for pat_data in pat_data_chunks:
+        pat_len = len(pat_data)
+        pat_data = pat_data.unsqueeze(0).to(device)
+        
+        pat_data.requires_grad = True
+        # check if we need to cut or pad the baseline data if we have some
+        if ig and baseline_data is not None:
+            pat_len = pat_data.shape[1]
+            if baseline_data.shape[1] > pat_len:
+                # cut to pat_data len
+                baseline_data = baseline_data[:, :pat_len, :]
+            elif baseline_data.shape[1] < pat_len:
+                # pad by repeating last timestep of baseline
+                pad_by = pat_data.shape[1] - baseline_data.shape[1]
+                num_feats = pat_data.shape[-1]
+                last_bl_step = baseline_data[:, -1, :].unsqueeze(1)
+                pad_tensor = torch.ones(1, pad_by, num_feats, device=pat_data.device) * last_bl_step
+                baseline_data = torch.cat([baseline_data, pad_tensor], dim=1)                                
+        # set attribution call kwargs
+        attr_kwargs = {}
+        if noise_tunnel:
+            attr_kwargs["nt_samples"] = 50
+            attr_kwargs["nt_type"] = "smoothgrad"
+            attr_kwargs["stdevs"] = sg_std
+        if ig:
+            attr_kwargs["n_steps"] = 50
+            attr_kwargs["baselines"] = baseline_data
+            attr_kwargs["internal_batch_size"] = 256
+        else:
+            attr_kwargs["abs"] = absolute
+        # calc attribution
+        attrs = model.attribute(pat_data, **attr_kwargs)
+        attrs = attrs.detach().cpu().squeeze(0).numpy()
+        pat_data = pat_data.detach().cpu()
+        all_attrs.append(attrs)
+    attrs = np.concatenate(all_attrs, axis=0)
     return attrs
 
 

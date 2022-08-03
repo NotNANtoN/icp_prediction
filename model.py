@@ -1,13 +1,12 @@
 import math
-from typing import List, Optional, Tuple
-from copy import deepcopy
+from typing import Optional, Tuple
 
 import numpy as np
 import pytorch_lightning as pl
 import sklearn
 import torch
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
+from x_transformers import ContinuousTransformerWrapper
 from x_transformers.x_transformers import AttentionLayers
 
 
@@ -86,6 +85,10 @@ class LitSeqModel(pl.LightningModule):
             x = x_emb.reshape(*x.shape[:-1], x_emb.shape[-1])
 
         preds = self.make_preds(x, *args, **kwargs)
+        return preds
+    
+    def predict(self, x, *args, **kwargs):
+        preds =  self.forward(x, *args, **kwargs)
         if not self.regression:
             preds = torch.sigmoid(preds)
         return preds
@@ -205,6 +208,24 @@ class LitSeqModel(pl.LightningModule):
             pats: A single patient sequence of shape [T, N] - T=steps, N=features. Unnormalized, contains NaNs
         """
         return self.data_module.preprocess(pat)
+    
+    
+    ### The two following functions fix the  'UserWarning: Detected call of `lr_scheduler.step()` before `optimizer.step()`'
+    # will be patched in later versions of PyTorch-lightning
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_idx, optimizer_closure, **kwargs):
+        self.should_skip_lr_scheduler_step = False
+        scaler = getattr(self.trainer.strategy.precision_plugin, "scaler", None)
+        if scaler:
+            scale_before_step = scaler.get_scale()
+        optimizer.step(closure=optimizer_closure)
+        if scaler:
+            scale_after_step = scaler.get_scale()
+            self.should_skip_lr_scheduler_step = scale_before_step > scale_after_step
+
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
+        if self.should_skip_lr_scheduler_step:
+            return
+        scheduler.step()
 
     
 class LitCLIP(LitSeqModel):
@@ -253,8 +274,7 @@ class LitCLIP(LitSeqModel):
         return x
         
         
-        
-def load_gpt_model(name):
+def load_gpt_model(name, use_adapter=False, reduction_factor=2):
     device = torch.device("cpu")
     if name == "neo1.3":
         from transformers import GPTNeoForCausalLM, GPT2Tokenizer
@@ -266,11 +286,27 @@ def load_gpt_model(name):
         gpt_model = GPTNeoForCausalLM.from_pretrained("EleutherAI/gpt-neo-2.7B", pad_token_id=gpt_tokenizer.eos_token_id)
     elif "gpt2" in name:
         from transformers import GPT2LMHeadModel, GPT2Tokenizer
-
         gpt_tokenizer = GPT2Tokenizer.from_pretrained(name)
-        gpt_model = GPT2LMHeadModel.from_pretrained(name, pad_token_id=gpt_tokenizer.eos_token_id)     
+        if use_adapter:
+            from transformers import GPT2AdapterModel
+            gpt_model = GPT2AdapterModel.from_pretrained(name, pad_token_id=gpt_tokenizer.eos_token_id)
+            # task adapter - only add if not existing
+            task_name = "icp"
+            # resolve the adapter config
+            from transformers import PfeifferConfig
+            adapter_config = PfeifferConfig.load(
+                reduction_factor=reduction_factor,
+            )
+            # add a new adapter
+            gpt_model.add_adapter(
+                task_name,
+                config=adapter_config
+            )
+            # Enable adapter training
+            gpt_model.train_adapter(task_name)
+        else:
+            gpt_model = GPT2LMHeadModel.from_pretrained(name, pad_token_id=gpt_tokenizer.eos_token_id)     
            
-        
     gpt_model = gpt_model.to(device)
     return gpt_model, gpt_tokenizer
 
@@ -292,9 +328,6 @@ def apply_train_mode_gpt(mode, model):
     elif mode == "adapters":
         for n, p in model.named_parameters():
             p.requires_grad = "adapter" in n or "ln_" in n
-        #    if p.requires_grad:
-        #        print(n)
-        #    #p.requires_grad = "ln_" in n or "mlp" in n
 
         
 class LitGPT(LitSeqModel):
@@ -302,12 +335,13 @@ class LitGPT(LitSeqModel):
                  gpt_name="gpt2",
                  mode="train_mlp_norm",
                  pretrained=True,
-                 reduction_factor=16,
+                 reduction_factor=2,
+                 use_adapter=False,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.gpt_name = gpt_name
         # load model
-        self.model, self.tokenizer = load_gpt_model(gpt_name)
+        self.model, self.tokenizer = load_gpt_model(gpt_name, use_adapter=use_adapter, reduction_factor=reduction_factor)
         # re-init weights if not using pretrained
         if not pretrained:
             self.model.init_weights()  #.apply(self.model._init_weights)

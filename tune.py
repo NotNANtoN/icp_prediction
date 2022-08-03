@@ -12,19 +12,6 @@ def main(cfg):
     # change to original working directory
     os.chdir(hydra.utils.get_original_cwd())
     cfg = dict(cfg)      
-    # overrides and calculated default vals
-    if cfg["lr"] is None:
-        model_type = cfg["model_type"]
-        if model_type == "clip":
-            cfg["lr"] = 0.001
-        elif model_type == "gpt":
-            # bs 8 and gpt2 take 9.8GB with max seq len of 512
-            # bs 16 with max seq len of 256
-            # bs 32 with max seq len 128 only 7.4GB, good performance and fast - 6.9 if mlp_norm
-            # bs 64 with len 128 and mlp_norm = 10.9GB. 9.4GB for freeze
-            cfg["lr"] = 0.00005
-        else:
-            cfg["lr"] = 0.0001  # 0.01 works kind of for nan_embed
                     
     os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg["gpu"])
     # disable wandb printing
@@ -35,16 +22,14 @@ def main(cfg):
     locals().update(cfg)
     
     import pandas as pd
-    import logging
-    import pytorch_lightning
+    #import logging
+    #import pytorch_lightning
     #logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
     #pytorch_lightning.utilities.distributed.log.setLevel(logging.ERROR)
     
     # load df
-    path = f"data/DB_{cfg['db_name']}_{cfg['minutes']}_final_df.pkl"
-    df = pd.read_pickle(path)
-
-    
+    path = f'data/DB_{cfg["db_name"]}_{cfg["minutes"]}_final_df.parquet'
+    df = pd.read_parquet(path)
 
     # run hebo tuning if wanted
     if cfg["tune_hebo"]:
@@ -61,9 +46,14 @@ def main(cfg):
     study = optuna.create_study(direction="maximize")  # Create a new study.
     print("Setup dm...")
     from tune_utils import setup_dm
-    dm = setup_dm(df, cfg)
+    
+    dev_df = df[df["split"] != "test"].copy()
+    test_df = df[df["split"] == "test"].copy()
+    
+    from train_utils import make_train_val_fold
+    dms = make_train_val_fold(dev_df, cfg, cfg["inner_folds"], test_df=test_df)
     print("Start tuning...")
-    study.optimize(lambda study: objective_optuna(study, df, cfg, dm=dm), 
+    study.optimize(lambda study: objective_optuna(study, df, cfg, dms=dms), 
                    n_trials=cfg["opt_steps"], gc_after_trial=True,
                    show_progress_bar=True,
                    )

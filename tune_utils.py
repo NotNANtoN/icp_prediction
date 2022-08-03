@@ -14,7 +14,7 @@ from data_utils import SeqDataModule
 from eval_utils import get_all_dfs
 
 
-def obj(df, cfg, opt_object, num_seeds=3, split="val", dm=None):
+def obj(df, cfg, opt_object, num_seeds=1, split="val", dms=None):
     # put in op_df
     cfg = copy.deepcopy(cfg)
     if isinstance(opt_object, pd.DataFrame):
@@ -23,14 +23,11 @@ def obj(df, cfg, opt_object, num_seeds=3, split="val", dm=None):
         opt_dict = opt_object
     cfg = merge_params_in_cfg(cfg, opt_dict)
     # calculate metrics for number of seeds
-    if num_seeds is None:
-        metric = train_and_eval_model(df, cfg, split=split, log=False, dm=dm)
-    else:
-        metrics = []
-        for seed in range(num_seeds):
-            cfg["seed"] = seed
-            metrics.append(train_and_eval_model(df, cfg, split=split, log=False, dm=dm))
-        metric = np.mean(metrics)
+    metrics = []
+    for seed in range(num_seeds):
+        cfg["seed"] = seed
+        metrics.append(train_and_eval_model(df, cfg, split=split, log=False, dms=dms))
+    metric = np.mean(metrics)
     return metric
 
 
@@ -57,13 +54,14 @@ def scale_hyperparameters(opt_df):
     return opt_df
 
 
-def train_and_eval_model(df, cfg, split, log=True, dm=None):
+def train_and_eval_model(df, cfg, split, log=True, dms=None):
     #setup dm
-    if dm is None:
-        dm = setup_dm(df, cfg)
+    if dms is None:
+        from train_utils import make_train_val_fold
+        dms = make_train_val_fold(df, cfg, cfg["outer_fold"])
     # train model on datamodule
-    models, trainers = train_model(cfg["model_type"], [dm], cfg, verbose=False, log=log)
-    metric = eval_model(dm, models, trainers, cfg["model_type"], split)
+    models, trainers = train_model(cfg["model_type"], dms, cfg, verbose=False, log=log)
+    metric = eval_model(dms[0].regression, models, trainers, cfg["model_type"], split)
     return metric
 
 
@@ -72,18 +70,20 @@ def setup_dm(df, cfg):
     pl.utilities.seed.seed_everything(seed=cfg["seed"], workers=False)
     # create datamodule with dataloaders
     dm = SeqDataModule(df, cfg["db_name"],
-                       target_name=cfg["target_name"],
-                       random_starts=cfg["random_starts"], 
-                       min_len=cfg["min_len"], 
-                       max_len=cfg["max_len"],
-                       train_noise_std=cfg["train_noise_std"], 
-                       batch_size=cfg["bs"], 
-                       fill_type=cfg["fill_type"], 
-                       flat_block_size=cfg["flat_block_size"],
-                       target_nan_quantile=cfg["target_nan_quantile"],
-                       block_size=cfg["block_size"],
-                       subsample_frac=cfg["subsample_frac"],
-                       )
+                        target_name=cfg["target_name"],
+                        random_starts=cfg["random_starts"], 
+                        min_len=cfg["min_len"], 
+                        max_len=cfg["max_len"],
+                        train_noise_std=cfg["train_noise_std"], 
+                        batch_size=cfg["bs"], 
+                        fill_type=cfg["fill_type"], 
+                        flat_block_size=cfg["flat_block_size"],
+                        target_nan_quantile=cfg["target_nan_quantile"],
+                        target_clip_quantile=cfg["target_clip_quantile"],
+                        block_size=cfg["block_size"],
+                        subsample_frac=cfg["subsample_frac"],
+                        randomly_mask_aug=cfg["randomly_mask_aug"],
+                        )
     dm.setup()
     return dm
 
@@ -96,15 +96,15 @@ def setup_dm_and_train(df, cfg, log=True):
     return dm, models, trainers
 
 
-def eval_model(dm, models, trainers, model_type, split):
+def eval_model(regression, models, trainers, model_type, split):
     # make preds on val set
-    pred_df = get_all_dfs(models, trainers, model_type, dm.regression, dl_type=split, dl=None, calc_new_norm_stats=False)
+    pred_df = get_all_dfs(models, trainers, model_type, regression, dl_type=split, dl=None, calc_new_norm_stats=False)
     
     # calc target metrics
     pred_df = pred_df.dropna(subset=["targets"])
     pred_targets = pred_df["targets"]
     preds = pred_df["preds"]
-    if dm.regression:
+    if regression:
         try:
             score = sklearn.metrics.r2_score(pred_targets, preds)
         except ValueError:
@@ -117,9 +117,9 @@ def eval_model(dm, models, trainers, model_type, split):
     return np.array([score])
 
 
-def get_val_and_test_metric(dm, models, trainers, cfg):
-    val_metric = eval_model(dm, models, trainers, cfg["model_type"], "val")
-    test_metric = eval_model(dm, models, trainers, cfg["model_type"], "test")
+def get_val_and_test_metric(dms, models, trainers, cfg):
+    val_metric = eval_model(dms[0].regression, models, trainers, cfg["model_type"], "val")
+    test_metric = eval_model(dms[0].regression, models, trainers, cfg["model_type"], "test")
     return val_metric, test_metric
 
 
@@ -223,7 +223,10 @@ def save_study_results(study, folder_name, model_type):
     plot = optuna.visualization.plot_optimization_history(study)
     save_plot(plot, "optimization_history")
     if model_type in ["rnn", "gpt", "mlp"]:
-        plot = optuna.visualization.plot_contour(study, params=["lr", "bs", "weight_decay", "grad_clip_val"])
+        params = ["lr", "weight_decay", "grad_clip_val"]
+        if "bs" in study.best_params:
+            params.append("bs")
+        plot = optuna.visualization.plot_contour(study, params=params)
     elif model_type == "xgb":
         plot = optuna.visualization.plot_contour(study, params=["lr", "n_estimators", "max_depth", "subsample",
                                                                 "colsample_bytree", "gamma", "min_child_weight",
@@ -234,7 +237,7 @@ def save_study_results(study, folder_name, model_type):
 
 def suggest_deep_learning(trial: optuna.trial.Trial):
     # suggest hyperparameters for deep learning models
-    rec = {'lr': trial.suggest_loguniform("lr", 1e-5, 1e-3),
+    rec = {'lr': trial.suggest_loguniform("lr", 1e-5, 1e-2),
             #'min_len': trial.suggest_int("min_len", 2, 128),
             #'train_noise_std': trial.suggest_float("train_noise_std", 0.001, 0.2),
             #'weight_decay': trial.suggest_float("weight_decay", 0.001, 0.4),
@@ -268,7 +271,7 @@ def suggest_logreg(trial):
            'l1_ratio': trial.suggest_discrete_uniform("l1_ratio", 0.0, 1.0, 0.05),}
     return rec
 
-def objective_optuna(trial: optuna.Trial, df, cfg, dm=None):
+def objective_optuna(trial: optuna.Trial, df, cfg, dms=None):
     # Invoke suggest methods of a Trial object to generate hyperparameters.
     if cfg["model_type"] in ["rnn", "gpt", "mlp"]:
         rec = suggest_deep_learning(trial)
@@ -282,9 +285,15 @@ def objective_optuna(trial: optuna.Trial, df, cfg, dm=None):
             elif cfg["gpt_name"] == "gpt2-xl":
                 rec["bs"] = 0
             elif cfg["gpt_name"] == "distilgpt2":
-                rec["bs"] =  7 #trial.suggest_int("bs", 2, 7)
+                rec["bs"] = 7
+            
+            rec["reduction_factor"] = trial.suggest_discrete_uniform("reduction_factor", 1, 6, 1)
+            rec["reduction_factor"] = int(2 ** rec["reduction_factor"])
+            
         else:
             rec["bs"] =  trial.suggest_int("bs", 2, 8)
+            
+        rec["randomly_mask_aug"] = trial.suggest_discrete_uniform("randomly_mask_aug", 0.0, 0.2, 0.02)
         
     else:
         if cfg["model_type"] in ("xgb", "rf"):
@@ -296,6 +305,6 @@ def objective_optuna(trial: optuna.Trial, df, cfg, dm=None):
             rec["flat_block_size"] =  trial.suggest_discrete_uniform("flat_block_size", 0, cfg["flat_block_size_range"], 1)
         else:
             rec["flat_block_size"] = cfg["flat_block_size"]
-    score = obj(df, cfg, rec, num_seeds=cfg["num_seeds"], dm=dm)
+    score = obj(df, cfg, rec, num_seeds=cfg["num_seeds"], dms=dms)
     return score  
 

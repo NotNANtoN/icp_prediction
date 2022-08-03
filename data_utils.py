@@ -1,6 +1,9 @@
+from dataclasses import dataclass
 import math
 import random
 from typing import Optional
+from sklearn import preprocessing
+from sklearn.semi_supervised import SelfTrainingClassifier
 
 import torch
 import numpy as np
@@ -85,9 +88,8 @@ def make_split(seq_list, test_size=0.2):
     return train_data, val_data, train_idcs, val_idcs
 
 
-def create_dl(ds, bs=32):
-    # create dl. shuffle is False because we shuffle in the IterableDataset for train data
-    dl = torch.utils.data.DataLoader(ds, batch_size=bs, shuffle=False, num_workers=16, pin_memory=False, collate_fn=seq_pad_collate, persistent_workers=1)            
+def create_dl(ds, bs=32, shuffle=False):
+    dl = torch.utils.data.DataLoader(ds, batch_size=bs, shuffle=shuffle, num_workers=16, pin_memory=False, collate_fn=seq_pad_collate, persistent_workers=0)            
     return dl
 
 
@@ -174,15 +176,120 @@ def ema_fill_mask(pat: np.ndarray, ema_val: float, mean: np.ndarray):
     return ema_steps
 
 
+
+class Preprocessor():
+    def __init__(self, fill_type) -> None:
+        self.fill_type = fill_type
+    
+    def fit(self, df: pd.DataFrame, input_cols) -> None:
+        X, y = df[input_cols], df["target"]
+          # clamp extremas according to pre-calculated vals and store them
+        # calc quantiles according to train data
+        self.upper_quants = torch.tensor(X.quantile(0.9999))
+        self.lower_quants = torch.tensor(X.quantile(1 - 0.9999))
+
+        # calc mean, median, std
+        self.mean, self.median, self.std = X.mean(), X.median(), X.std()
+        self.mean, self.median, self.std = (torch.tensor(x).float() for x in (self.mean, self.median, self.std))
+        self.mean_train_target = y.mean()
+        self.mean_train_target_pat = df.groupby("Pat_ID").apply(lambda pat: pat["target"].mean()).mean()
+        
+        # calc std target
+        self.std_train_target = y.std()
+        
+        # create tokenizer for gpt if needed
+        create_tokenier = False
+        if create_tokenier:
+            # todo: in preprocess all, we want to apply the procedure below to fit the kmeans tokenizer on train data
+            # TODO: then we want to apply kmeans tokenizer to all input steps
+            # TODO: finally we need to adjust the GPT model creation - we now just need to reinitialize the dictionary at the start
+            # TODO: ! make sure that this dictionary is set to trainable in apply_train_mode, as the "adapters" setting will set it to requires_grad=False
+
+            filled_df = df.copy().fillna(df.median())
+            cluster_df = filled_df.copy().drop(columns=["split"])
+            cluster_df = cluster_df.drop(columns=["Pat_ID"])
+            # create 4 time steps for each Pat_ID that averages the steps between 0-25%, 25-50, 50-75, 75-100%
+            def summarize_pat_generalized(pat, num_partitions=4):
+                out = []
+                for i in range(num_partitions):
+                    out.append(pat.iloc[int(len(pat) * i / num_partitions):int(len(pat) * (i + 1) / num_partitions)].mean(axis=0))
+                return pd.DataFrame([o.to_numpy() for o in out], columns=pat.columns)#.drop(columns=["Pat_ID"]).columns)
+
+            cluster_df = cluster_df.groupby("Pat_ID").apply(lambda x: summarize_pat_generalized(x, 4) if len(x) >= 4 else None)# x.sample(4, random_state=cfg["seed"]) if len(x) > 4 else None)
+            cluster_df = cluster_df.reset_index(drop=True).drop(columns=["Pat_ID"])
+
+            # import kmeans from sklearn
+            from sklearn.cluster import KMeans
+            # create kmeans model
+            kmeans = KMeans(n_clusters=100, random_state=0).fit(cluster_df)
+            # get cluster centroids
+            centroids = kmeans.cluster_centers_
+            centroid_df = pd.DataFrame(centroids, columns=cluster_df.columns)
+            # predict labels for cluster df
+            labels = kmeans.predict(cluster_df)
+    
+        
+    def transform(self, pat):
+        pat = pat.clip(self.lower_quants, self.upper_quants)
+        pat = self.fill_pat(pat)
+        pat = (pat -  self.mean) / self.std
+        return pat
+    
+    def transform_target(self, target):
+        return (target - self.mean_train_target) / self.std_train_target
+    
+    def fit_transform(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+        self.fit(X, y)
+        return self.transform(X)
+    
+    def fill_pat(self, pat):
+        if self.fill_type is None or self.fill_type == "none":
+            return pat
+        
+        pat = pat.numpy().astype(np.float32)
+        median = self.median.numpy().astype(np.float32)
+        
+        nan_mask = np.isnan(pat)
+        if self.fill_type == "pat_median":
+            count = (~nan_mask).cumsum(axis=0) + 1
+            # calc cumsum without nans
+            median_filled = pat.copy()
+            median_filled[nan_mask] = np.expand_dims(median, 0).repeat(pat.shape[0], axis=0)[nan_mask]
+            #median.repeat(pat.shape[0], 1)[nan_mask]
+            cumsum = median_filled.cumsum(axis=0)
+            # calc mean until step:
+            mean_until_step = cumsum / count
+            # fill mean until step
+            pat[nan_mask] = mean_until_step[nan_mask]            
+        elif self.fill_type == "pat_ema":        
+            ema_val = 0.9
+            pat = ema_fill(pat, ema_val, median)
+        elif self.fill_type == "pat_ema_mask":
+            ema_val = 0.3
+            pat = ema_fill_mask(pat, ema_val, median)
+
+        pat = torch.from_numpy(pat)
+        median = torch.from_numpy(median)
+        # always fill remaining NaNs with the median
+        nan_mask = torch.isnan(pat)
+        pat[nan_mask] = median.repeat(pat.shape[0], 1)[nan_mask]
+        
+        assert torch.isnan(pat).sum() == 0, "NaNs still in tensor after filling!"
+        return pat
+    
+
 class SeqDataModule(pytorch_lightning.LightningDataModule):
-    def __init__(self, df, db_name,
+    def __init__(self, df,
                  batch_size: int = 32, random_starts=False, 
                  min_len=10, train_noise_std=0.0, 
                  fill_type="pat_ema", flat_block_size=0, 
-                 target_name = "ICP_Vital", target_nan_quantile=0,
+                 target_name = "ICP_Vital", 
+                 target_nan_quantile=0,
+                 target_clip_quantile=0,
                  block_size=0,
                  max_len=0,
                  subsample_frac=1.0,
+                 randomly_mask_aug=0.0,
                 ):
         super().__init__()
         
@@ -196,17 +303,16 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
         self.fill_type = fill_type
         self.flat_block_size = flat_block_size
         self.target_nan_quantile = target_nan_quantile
+        self.target_clip_quantile = target_clip_quantile
         self.block_size = block_size
         self.max_len = max_len
         
         # construct targets and drop respective columns
         diagnose_cols = [col for col in df.columns if "diagnose" in col.lower()]
         
-        
         #if target_name in ["VS", "CI"]:
         #    label_df = pd.read_csv("data/sah_labels.csv").drop_duplicates("Patienten ID")
         # SAH needs to be done in preprocesing notebook because it happens at one specific time.    
-            
             
         if target_name in diagnose_cols:
             self.regression = False
@@ -255,66 +361,18 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
             df["target"] = df[target_name]
             df = df.drop(columns=[target_name])
         
-        
         # apply splits
         self.df = df
         train_data = df[df["split"] == "train"].drop(columns=["split"])
         val_data = df[df["split"] == "val"].drop(columns=["split"])
         test_data = df[df["split"] == "test"].drop(columns=["split"])
         
-        non_input_cols = ["Pat_ID", "target"]
+        non_input_cols = ["Pat_ID", "target", "window_id"]
         input_cols = [col for col in train_data.columns if col not in non_input_cols]
         
-        # clamp extremas according to pre-calculated vals and store them
-        # calc quantiles according to train data
-        self.upper_quants = torch.tensor(train_data[input_cols].quantile(0.9999))
-        self.lower_quants = torch.tensor(train_data[input_cols].quantile(1 - 0.9999))
-
-        # calc mean, median, std
-        self.means, self.medians, self.stds = train_data[input_cols].mean(), train_data[input_cols].median(), train_data[input_cols].std()
-        self.means, self.medians, self.stds = (torch.tensor(x).float() for x in (self.means, self.medians, self.stds))
-        self.mean_train_target = train_data["target"].mean()
-        self.mean_train_target_pat = train_data.groupby("Pat_ID").apply(lambda pat: pat["target"].mean()).mean()
-        
-        # create tokenizer for gpt if needed
-        create_tokenier = False
-        if create_tokenier:
-            # todo: in preprocess all, we want to apply the procedure below to fit the kmeans tokenizer on train data
-            # TODO: then we want to apply kmeans tokenizer to all input steps
-            # TODO: finally we need to adjust the GPT model creation - we now just need to reinitialize the dictionary at the start
-            # TODO: ! make sure that this dictionary is set to trainable in apply_train_mode, as the "adapters" setting will set it to requires_grad=False
-            
-
-            filled_df = df.copy().fillna(df.median())
-            cluster_df = filled_df.copy().drop(columns=["split"])
-            cluster_df = cluster_df.drop(columns=["Pat_ID"])
-            # create 4 time steps for each Pat_ID that averages the steps between 0-25%, 25-50, 50-75, 75-100%
-            def summarize_pat(pat):
-                first_quarter = pat.iloc[:int(len(pat) * 0.25)].mean(axis=0)
-                second_quarter = pat.iloc[int(len(pat) * 0.25):int(len(pat) * 0.5)].mean(axis=0)
-                third_quarter = pat.iloc[int(len(pat) * 0.5):int(len(pat) * 0.75)].mean(axis=0)
-                fourth_quarter = pat.iloc[int(len(pat) * 0.75):].mean(axis=0)
-                out = [first_quarter, second_quarter, third_quarter, fourth_quarter]
-                return pd.DataFrame([o.to_numpy() for o in out], columns=pat.columns)#.drop(columns=["Pat_ID"]).columns)
-            def summarize_pat_generalized(pat, num_partitions=4):
-                out = []
-                for i in range(num_partitions):
-                    out.append(pat.iloc[int(len(pat) * i / num_partitions):int(len(pat) * (i + 1) / num_partitions)].mean(axis=0))
-                return pd.DataFrame([o.to_numpy() for o in out], columns=pat.columns)#.drop(columns=["Pat_ID"]).columns)
-
-            cluster_df = cluster_df.groupby("Pat_ID").apply(lambda x: summarize_pat_generalized(x, 4) if len(x) >= 4 else None)# x.sample(4, random_state=cfg["seed"]) if len(x) > 4 else None)
-            cluster_df = cluster_df.reset_index(drop=True).drop(columns=["Pat_ID"])
-
-            # import kmeans from sklearn
-            from sklearn.cluster import KMeans
-            # create kmeans model
-            kmeans = KMeans(n_clusters=100, random_state=0).fit(cluster_df)
-            # get cluster centroids
-            centroids = kmeans.cluster_centers_
-            centroid_df = pd.DataFrame(centroids, columns=cluster_df.columns)
-            # predict labels for cluster df
-            labels = kmeans.predict(cluster_df)
-
+        # create preprocessor and fit on train data
+        self.preprocessor = Preprocessor(fill_type)
+        self.preprocessor.fit(train_data, input_cols)
 
         # create datasets
         self.train_ds = SequenceDataset(train_data, train=True,
@@ -325,20 +383,25 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
                                         train_noise_std=self.train_noise_std,
                                         flat_block_size=self.flat_block_size,
                                         target_nan_quantile=self.target_nan_quantile,
-                                        subsample_frac=subsample_frac) if train_data is not None else None
-        self.val_ds = SequenceDataset(val_data, train=False, random_starts=False, block_size=self.block_size, 
+                                        target_clip_quantile=self.target_clip_quantile,
+                                        subsample_frac=subsample_frac,
+                                        randomly_mask_aug=randomly_mask_aug) if train_data is not None else None
+        self.val_ds = SequenceDataset(val_data, train=False, random_starts=False, block_size=0, 
                          train_noise_std=0.0, flat_block_size=self.flat_block_size,
                                      max_len=self.max_len,) if val_data is not None else None
-        self.test_ds = SequenceDataset(test_data, train=False, random_starts=False, block_size=self.block_size, 
+        if test_data is not None and len(test_data) > 0:
+            self.test_ds = SequenceDataset(test_data, train=False, random_starts=False, block_size=0, 
                          train_noise_std=0.0, flat_block_size=self.flat_block_size,
-                                      max_len=self.max_len,) if test_data is not None else None
+                                      max_len=self.max_len,)
+        else: 
+            self.test_ds = None
         self.datasets = [ds for ds in [self.train_ds, self.val_ds, self.test_ds] if ds is not None]
         
         self.feature_names = self.train_ds.feature_names
         self.setup_completed = False
-         
-            
-        #self.initial_setup()
+                 
+    def get_preprocessor(self):
+        return self.preprocessor
         
     def setup(self, stage: Optional[str] = None): 
         # this method should only be called shortly before training
@@ -348,38 +411,31 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
             # potentially get yeo-john lambdas from train dataset
             # potentially apply lambdas to all datasets
             for ds in self.datasets:
-                ds.preprocess_all(fill_type=self.fill_type, median=self.medians, mean=self.means, std=self.stds, lower_quants=self.lower_quants, upper_quants=self.upper_quants)
+                # apply preprocessor
+                ds.inputs = [self.preprocessor.transform(pat) for pat in ds.raw_inputs]
+                ds.targets = [self.preprocessor.transform_target(t) for t in ds.raw_targets]
+
+                ds.make_flat_arrays(self.preprocessor.fill_type, self.preprocessor.median, flat_block_size=self.flat_block_size)
             # done
             self.setup_completed = True
-            
-    def fill(self, median, fill_type):
-        for ds in self.datasets:
-            ds.fill(median, fill_type)
-    
-    def norm(self, mean, std):
-        for ds in self.datasets:
-            ds.norm(mean, std)
-            
-    def make_flat_arrays(self):
-        for ds in self.datasets:
-            ds.make_flat_arrays(self.flat_block_size)
+             
 
     def train_dataloader(self):
-        return create_dl(self.train_ds, bs=self.batch_size) if self.train_ds is not None else None
+        return create_dl(self.train_ds, bs=self.batch_size, shuffle=True) if self.train_ds is not None else None
 
     def val_dataloader(self):
-        return create_dl(self.val_ds, bs=self.batch_size) if self.val_ds is not None else None
+        eval_bs = max(self.batch_size // 16, 4)
+        return create_dl(self.val_ds, bs=eval_bs) if self.val_ds is not None else None
 
     def test_dataloader(self):
-        return create_dl(self.test_ds, bs=self.batch_size) if self.test_ds is not None else None
-    
-    def preprocess(self, pat):
-        return self.train_ds.preprocess(pat, self.fill_type, median=self.medians, mean=self.means, std=self.stds, lower_quants=self.lower_quants, upper_quants=self.upper_quants)
+        eval_bs = max(self.batch_size // 16, 4)
+        return create_dl(self.test_ds, bs=eval_bs) if self.test_ds is not None else None
 
         
 class SequenceDataset(torch.utils.data.Dataset):
     def __init__(self, data, train, random_starts=1, block_size=0, min_len=10, train_noise_std=0.1, 
-                 flat_block_size=0, target_nan_quantile=0, max_len=0, subsample_frac=1.0):
+                 flat_block_size=0, target_nan_quantile=0, target_clip_quantile=0, max_len=0, 
+                 subsample_frac=1.0, randomly_mask_aug=0):
         self.random_starts = random_starts
         self.min_len = min_len
         self.max_len = max_len
@@ -389,21 +445,35 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.flat_block_size = flat_block_size
         self.target_nan_quantile = target_nan_quantile
         self.subsample_frac = subsample_frac
+        self.randomly_mask_aug = randomly_mask_aug
         
-        if target_nan_quantile > 0:
-            data = data.copy()
-            low_quant = data["target"].quantile(1 - target_nan_quantile)
-            high_quant = data["target"].quantile(target_nan_quantile)
-            data.loc[data["target"] > high_quant, "target"] = np.nan
-            data.loc[data["target"] < low_quant, "target"] = np.nan
+        if train:
+            if target_nan_quantile > 0:
+                data = data.copy()
+                self.upper_target_nan_quantile = data["target"].quantile(target_nan_quantile)
+                self.lower_target_nan_quantile = data["target"].quantile(1 - target_nan_quantile)
+                data.loc[data["target"] > self.upper_target_nan_quantile, "target"] = np.nan
+                data.loc[data["target"] < self.lower_target_nan_quantile, "target"] = np.nan
+                
+            if target_clip_quantile > 0:
+                data = data.copy()
+                self.upper_target_clip_quantile = data["target"].quantile(target_clip_quantile)
+                self.lower_target_clip_quantile = data["target"].quantile(1 - target_clip_quantile)
+                data.loc[data["target"] > self.upper_target_clip_quantile, "target"] = self.upper_target_clip_quantile
+                data.loc[data["target"] < self.lower_target_clip_quantile, "target"] = self.lower_target_clip_quantile
         
         # copy each sequence to not modify it outside of here
-        data = [data[data["Pat_ID"] == pat_id].drop(columns=["Pat_ID"]) for pat_id in data["Pat_ID"].unique()]
-        # subsampe part of patients
+        # group by patient_id and window_id and make list out of it
+        grouped = data.groupby(["Pat_ID", "window_id"])
+        list_of_windows = []
+        for _, group in grouped:
+            list_of_windows.append(group.copy().drop(columns=["Pat_ID", "window_id"]))
+        data = list_of_windows
+        # subsample part of patients
         if subsample_frac < 1.0:
             data = [data[i] for i in np.random.choice(range(len(data)), int(len(data) * subsample_frac), replace=False)]
         self.raw_inputs = to_torch([p.drop(columns=["target"]) for p in data])
-        self.targets = to_torch([p["target"] for p in data])
+        self.raw_targets = to_torch([p["target"] for p in data])
         
         self.feature_names = list(data[0].drop(columns=["target"]).columns)
         
@@ -427,22 +497,8 @@ class SequenceDataset(torch.utils.data.Dataset):
                 total_len = self.block_size
                 start_idx = random.randint(0, seq_len - total_len) if seq_len > total_len else 0
                 end_idx = start_idx + total_len
-                
                 x = x[start_idx: end_idx]
                 y = y[start_idx: end_idx]
-                #if len(x) < self.block_size:
-                #    x_padding = torch.zeros(size=(self.block_size - len(x), x.shape[1]), dtype=x.dtype)
-                #    x = torch.cat((x, x_padding))
-                #    y_padding = torch.zeros(size=(self.block_size - len(y),), dtype=y.dtype) * np.nan
-                #    y = torch.cat((y, y_padding))
-                #y = y[-1]
-                #y = y.unsqueeze(0)
-                #seq_len = end_idx - start_idx
-            #elif self.random_starts:
-            #    start_idx = random.randint(0, max(seq_len - self.min_len, 0))
-            #    if start_idx > 0:
-            #        x = x[start_idx:]
-            #        y = y[start_idx:]
             else:
                 start_idx = 0
                 
@@ -454,107 +510,14 @@ class SequenceDataset(torch.utils.data.Dataset):
         if self.train_noise_std:
             x = torch.normal(x, self.train_noise_std)
             
+        if self.randomly_mask_aug:
+            # set parts randomly to NaN
+            mask = torch.rand(x.shape, device=x.device, dtype=x.dtype) < self.randomly_mask_aug
+            x[mask] = torch.nan
+            # fill 
+            x = self.fill_pat(x, self.median, self.fill_type)
+            
         return x.float(), y.float()
-    
-    def clip_pat(self, pat, lower_quants, upper_quants):
-        return pat.clip(lower_quants, upper_quants)
-    
-    def clip(self, lower_quants, upper_quants):
-        self.inputs = [self.clip_pat(pat, lower_quants, upper_quants) for pat in self.raw_inputs]
-
-    def preprocess_all(self, fill_type, median=None, mean=None, std=None, upper_quants=None, lower_quants=None):
-        if self.all_preprocessed:
-            return
-        
-        # apply clipping
-        self.clip(lower_quants, upper_quants)
-
-        # 1. apply filling 
-        self.fill(median, fill_type)
-
-        # 2. apply normalization 
-        self.norm(mean, std)
-
-        # 3. make flat inputs for classical ML models after having preprocessed the data
-        self.make_flat_arrays(fill_type, median)
-        
-        self.all_preprocessed = True
-        self.mean = mean
-        self.median = median
-        self.std = std
-        
-    def preprocess(self, pat, fill_type, median=None, mean=None, std=None,
-                   lower_quants=None, upper_quants=None):
-        pat = self.clip_pat(pat, lower_quants, upper_quants)
-        pat = self.fill_pat(pat, median, fill_type)
-        pat = self.norm_pat(pat, mean, std)
-        return pat
-    
-    def get_input_median(self):
-        median = self.get_agg_statistic(self.raw_inputs, lambda pat: np.ma.median(pat, axis=0), agg="median")
-        return torch.from_numpy(median)
-    
-    def fill(self, 
-             median: torch.Tensor,
-             fill_type: str="pat_median", # pat_mean, mean, pat_ema, pat_ema_mask, none
-            ):
-        """Fill the NaN by using the mean of the values so far or just the overall train data mean for a single patient"""
-        self.inputs = [self.fill_pat(pat, median, fill_type) for pat in self.inputs]
-        
-    def fill_pat(self, pat, median, fill_type):
-        if fill_type is None or fill_type == "none":
-            return pat
-        
-        pat = pat.numpy().astype(np.float32)
-        median = median.numpy().astype(np.float32)
-        
-        nan_mask = np.isnan(pat)
-        if fill_type == "pat_median":
-            count = (~nan_mask).cumsum(axis=0) + 1
-            # calc cumsum without nans
-            median_filled = pat.copy()
-            median_filled[nan_mask] = np.expand_dims(median, 0).repeat(pat.shape[0], axis=0)[nan_mask]
-            #median.repeat(pat.shape[0], 1)[nan_mask]
-            cumsum = median_filled.cumsum(axis=0)
-            # calc mean until step:
-            mean_until_step = cumsum / count
-            # fill mean until step
-            pat[nan_mask] = mean_until_step[nan_mask]            
-        elif fill_type == "pat_ema":        
-            ema_val = 0.9
-            pat = ema_fill(pat, ema_val, median)
-        elif fill_type == "pat_ema_mask":
-            ema_val = 0.3
-            pat = ema_fill_mask(pat, ema_val, median)
-
-        pat = torch.from_numpy(pat)
-        median = torch.from_numpy(median)
-        # always fill remaining NaNs with the median
-        nan_mask = torch.isnan(pat)
-        pat[nan_mask] = median.repeat(pat.shape[0], 1)[nan_mask]
-        
-        assert torch.isnan(pat).sum() == 0, "NaNs still in tensor after filling!"
-        
-        return pat
-    
-    def get_mean_std(self):
-        mean = self.get_agg_statistic(self.inputs, lambda pat: np.ma.mean(pat, axis=0))
-        std = self.get_agg_statistic(self.inputs, lambda pat: np.ma.std(pat, axis=0))
-        return torch.from_numpy(mean), torch.from_numpy(std)
-    
-    def get_agg_statistic(self, seq_list, func, agg="mean"):
-        stats = np.array([func(np.ma.masked_array(seq.numpy(), mask=np.isnan(seq.numpy()))) for seq in seq_list])
-        if agg == "mean":
-            stat = np.ma.mean(np.ma.masked_array(stats, mask=np.isnan(stats)), axis=0)
-        else:
-            stat = np.ma.median(np.ma.masked_array(stats, mask=np.isnan(stats)), axis=0)
-        return stat
-    
-    def norm(self, mean, std):
-        self.inputs = [(pat - mean) / std for pat in self.inputs]
-        
-    def norm_pat(self, pat, mean, std):
-        return (pat - mean) / std
         
     def make_flat_arrays(self, fill_type, median, flat_block_size=None):
         if flat_block_size is None:

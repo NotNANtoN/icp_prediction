@@ -4,7 +4,21 @@ import torch
 import sklearn
 
 
-def get_dl(data_module, dl_type):
+def get_dl(data_module, dl_type, bs=32):
+    if dl_type == "test":
+        ds = data_module.test_ds
+    elif dl_type == "train":
+        ds = data_module.train_ds
+        ds.train = False
+    else:
+        ds = data_module.val_ds
+        
+    from data_utils import create_dl
+    dl = create_dl(ds, bs=bs)    
+    return dl
+
+"""
+# legacy
     if dl_type == "test":
         dl = data_module.test_dataloader()
     elif dl_type == "train":
@@ -13,7 +27,7 @@ def get_dl(data_module, dl_type):
     else:
         dl = data_module.val_dataloader()
     return dl
-
+"""
 
 def get_mean_train_target(data_module):
     return np.concatenate([pat[~torch.isnan(pat)].numpy() for pat in data_module.train_ds.targets]).mean()
@@ -32,8 +46,10 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
     model.to("cuda")
     model.eval()
     # get dataloader
+    max_batch_size = 4
+
     if dl is None:
-        dl = get_dl(model.data_module, dl_type)
+        dl = get_dl(model.data_module, dl_type, bs=max_batch_size)
     else:
         # normalize inputs if the dl was not used in datamodule
         if not hasattr(dl.dataset, "was_normed") or dl.dataset.was_normed == False:
@@ -44,6 +60,7 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
             else:
                 dl.dataset.inputs = [model.data_module.preprocess(pat) for pat in dl.dataset.raw_inputs]
             dl.dataset.was_normed = True
+        
     
     # make preds
     for inputs, targets, lens in dl:
@@ -60,6 +77,7 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
         ids = torch.stack([torch.ones(inputs.shape[1]) * (count + i) for i in range(bs)]).unsqueeze(-1)
         count += bs
 
+        inputs = inputs.cpu().numpy()
         targets = torch.cat([t[:l] for t, l in zip(targets, lens)]).flatten().cpu()
         times = torch.cat([t[:l] for t, l in zip(times, lens)]).flatten().cpu()
         preds = torch.cat([t[:l] for t, l in zip(preds, lens)]).flatten().cpu()
@@ -83,7 +101,6 @@ def make_pred_df(model, dl_type="test", dl=None, calc_new_norm_stats=False):
     
 
     df = pd.DataFrame({"targets": all_targets, "preds": all_preds, "ids": all_ids, "step": all_times, "error": all_errors})
-    df["mean_train_target"] = model.data_module.mean_train_target  #get_mean_train_target(model.data_module)
     return df
 
 
@@ -111,7 +128,8 @@ def make_pred_df_xgb(model, data_module, regression, dl_type="test", dl=None, ca
         preds = model.predict_proba(inputs)[:, 1]
     errors = (preds - targets) ** 2
     df = pd.DataFrame({"targets": targets, "preds": preds, "ids": ids, "step": steps, "error": errors})
-    df["mean_train_target"] = data_module.mean_train_target
+    
+
     return df
 
 def mape(targets, preds):
@@ -132,6 +150,15 @@ def hypertension_acc(targets, preds):
     hyper_preds = preds > thresh
     hyper_acc = (hyper_targets == hyper_preds).astype(float).mean()
     return hyper_acc
+
+from sklearn.metrics import roc_auc_score
+def hypertension_auc(targets, preds):
+    thresh = 22
+    targets = targets > thresh
+    #targets = targets.numpy()
+    #preds = preds.flatten.numpy()
+    auc = roc_auc_score(targets, preds)
+    return auc
 
 
 def hypertension_prec_rec(targets, preds):
@@ -195,6 +222,7 @@ def print_all_metrics(df):
     print("MAPE: ", df_nona.groupby("model_id").apply(lambda pat: mape(pat["targets"], pat["preds"])).mean())
     #print("all R2", df_nona.groupby("ids").apply(lambda pat: r2_score(pat["targets"], pat["preds"], baseline_target=mean_target)))
     print("R2 custom: ", 1 - pred_mse / test_target_mse)
+    print("R2 macro: ", df_nona.groupby("ids").apply(lambda pat: r2_score(pat["targets"], pat["preds"], baseline_target=mean_target)).mean())
     print("R2: ", df_nona.groupby("model_id").apply(lambda pat: r2_score(pat["targets"], pat["preds"], baseline_target=mean_target)).mean())
     print("R2 old: ", sklearn.metrics.r2_score(targets, preds))
     print("Accuracy for hypertension: ", hypertension_acc(targets, preds).mean())#.groupby("model_id").apply(lambda pat: hypertension_acc(pat["targets"], pat["preds"])).mean())
@@ -285,4 +313,17 @@ def get_all_dfs(models, trainers, model_type, regression, dl_type="test", dl=Non
         dfs = [make_pred_df(model, dl_type=dl_type, dl=dl, calc_new_norm_stats=calc_new_norm_stats) for model in models]
     for i in range(len(dfs)):
         dfs[i]["model_id"] = i
-    return pd.concat(dfs)
+        df = dfs[i]
+        if model_type in classical_models:
+            dm = trainers[i]
+        else:
+            model = models[i]
+            dm = model.data_module
+        df["mean_train_target"] = dm.preprocessor.mean_train_target
+        df["std_train_target"] = dm.preprocessor.std_train_target
+        print(df["mean_train_target"].mean())
+    df = pd.concat(dfs)
+    if model_type not in classical_models:
+        df["preds"] *= df["std_train_target"]
+        df["targets"] *= df["std_train_target"]
+    return df
