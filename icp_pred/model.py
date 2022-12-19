@@ -389,7 +389,10 @@ class LitTransformer(LitSeqModel):
         from torch.nn import TransformerEncoder, TransformerEncoderLayer
         
         self.pos_encoder = PositionalEncoding(hidden_size, self.dropout)
-        encoder_layers = TransformerEncoderLayer(hidden_size, n_heads, hidden_size * 4, self.dropout, batch_first=True)
+        encoder_layers = TransformerEncoderLayer(hidden_size, n_heads, 
+                                                 hidden_size * 4, self.dropout, 
+                                                 batch_first=True,
+                                                 norm_first=False)
         self.transformer_encoder = TransformerEncoder(encoder_layers, num_transformer_blocks)
         self.encoder = torch.nn.Linear(self.num_recurrent_inputs, hidden_size)
         self.decoder = torch.nn.Linear(hidden_size, 1)

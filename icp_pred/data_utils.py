@@ -52,16 +52,6 @@ def do_fold(dev_data, test_data, dbs, random_starts, min_len, train_noise_std, b
 
 
 
-def create_seq_labels(seq_list, target_name="ICP_Vital"):
-    median_len = np.median([len(pat) for pat in seq_list])
-    median_target = np.median([seq[target_name][~seq[target_name].isna()].mean() for seq in seq_list])
-    #print("Mean len: ", mean_len)
-    #print("Mean target: ", mean_target)
-    labels =  [(len(seq) < median_len).astype(int).astype(str) +
-               ((seq[target_name][~seq[target_name].isna()].mean() < median_target).astype(int).astype(str))
-               for seq in seq_list]
-    return labels
-
 
 def make_fold(seq_list, k=5, seed=None):
     seq_list = np.array(seq_list, dtype=object)
@@ -81,16 +71,27 @@ def make_fold(seq_list, k=5, seed=None):
     return train_data, val_data, train_idcs, val_idcs
 
 
-def make_split(seq_list, test_size=0.2):
+def create_seq_labels(seq_list, target_name="ICP_Vital"):
+    median_len = np.median([len(pat) for pat in seq_list])
+    median_target = np.median([seq[target_name][~seq[target_name].isna()].mean() for seq in seq_list])
+    #print("Mean len: ", mean_len)
+    #print("Mean target: ", mean_target)
+    labels =  [(len(seq) < median_len).astype(int).astype(str) +
+               ((seq[target_name][~seq[target_name].isna()].mean() < median_target).astype(int).astype(str))
+               for seq in seq_list]
+    return labels
+
+def make_split(seq_list, test_size=0.2, seed=1):
     indices = np.arange(len(seq_list))
     labels = create_seq_labels(seq_list)
     train_data, val_data, train_idcs, val_idcs = train_test_split(seq_list, indices, test_size=test_size,
-                                                                  stratify=labels, shuffle=True)
+                                                                  stratify=labels, shuffle=True,
+                                                                  random_state=seed)
     return train_data, val_data, train_idcs, val_idcs
 
 
 def create_dl(ds, bs=32, shuffle=False):
-    dl = torch.utils.data.DataLoader(ds, batch_size=bs, shuffle=shuffle, num_workers=16, pin_memory=False, collate_fn=seq_pad_collate, persistent_workers=0)            
+    dl = torch.utils.data.DataLoader(ds, batch_size=bs, shuffle=shuffle, num_workers=0, pin_memory=True, collate_fn=seq_pad_collate, persistent_workers=0)            
     return dl
 
 
@@ -122,19 +123,19 @@ def make_flat_inputs(inputs, flat_block_size, fill_type, median, max_len, target
             pat = pat.numpy()
            
             for time_idx in range(len(pat)):
-                # skip block for training if targets are given
+                # skip block for training if targets are not given
                 if targets is not None and np.isnan(targets[pat_idx][time_idx]):
                     continue
                 
-                start_idx = max(time_idx + 1 - flat_block_size, 0)
                 end_idx = time_idx + 1
+                start_idx = max(end_idx - flat_block_size, 0)
                 block = pat[start_idx: end_idx]
+                # pad at start if block is too short
                 size_diff = flat_block_size - block.shape[0]
                 if size_diff > 0:
-                    # pad start with zeros
                     if fill_type == "none":
                         pad_prefix = np.zeros((size_diff, num_feats)) * np.nan
-                    else:#elif fill_type == "median":
+                    else:
                         pad_prefix = np.full((size_diff, num_feats), median)
                     block = np.concatenate([pad_prefix, block], axis=0)
                 # make flat
@@ -524,11 +525,11 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
         return create_dl(self.train_ds, bs=self.batch_size, shuffle=True) if self.train_ds is not None else None
 
     def val_dataloader(self):
-        eval_bs = max(self.batch_size // 16, 4)
+        eval_bs = max(self.batch_size // 8, 4)
         return create_dl(self.val_ds, bs=eval_bs) if self.val_ds is not None else None
 
     def test_dataloader(self):
-        eval_bs = max(self.batch_size // 16, 4)
+        eval_bs = max(self.batch_size // 8, 4)
         return create_dl(self.test_ds, bs=eval_bs) if self.test_ds is not None else None
 
         

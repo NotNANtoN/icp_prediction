@@ -10,8 +10,8 @@ import optuna
 import numpy as np
 
 from train_utils import train_model
-from eval_utils import get_all_dfs
-from data_utils import do_fold
+from icp_pred.eval_utils import get_all_dfs
+from icp_pred.data_utils import do_fold
 
 
 

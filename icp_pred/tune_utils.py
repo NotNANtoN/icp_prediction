@@ -100,9 +100,31 @@ def setup_dm_and_train(df, cfg, log=True):
     return dm, models, trainers
 
 
+def eval_model_new_no_xgb(models, dms):
+    from icp_pred.eval_utils import make_eval_preds, calc_metrics
+
+    out = make_eval_preds(models, dms,
+                         cfg["block_size"],
+                         restrict_to_block_size=cfg["block_size"] <= 16,                 
+                         clip_targets=1,
+                         normalize_targets=cfg["norm_targets"],
+                         split = "val",)
+    all_targets, all_preds, all_raw_inputs = out
+    
+    try:
+        metrics, flat_targets, flat_preds = calc_metrics(all_targets, all_preds)
+        score = metrics["mse"]
+    except ValueError:
+        score = 200
+
+    return score
+    
+
 def eval_model(regression, models, data_modules, model_type, split, norm_targets):
     # make preds on val set
-    pred_df = get_all_dfs(models, data_modules, model_type, regression, dl_type=split, dl=None,
+    pred_df = get_all_dfs(models, data_modules, model_type,
+                          regression, 
+                          dl_type=split, dl=None,
                           norm_targets=norm_targets)
     
     # calc target metrics
@@ -138,6 +160,7 @@ def train_and_test(df, cfg, num_seeds=5, return_weights=False):
     #test_scores = []
     weights = []
     all_models = []
+    dms = []
     for seed in tqdm(range(cfg["seed"], cfg["seed"] + num_seeds), desc="Training models with best parameters", disable=num_seeds==1):
         cfg["seed"] = seed
         dm, models, _ = setup_dm_and_train(df, cfg, log=False)
@@ -151,19 +174,12 @@ def train_and_test(df, cfg, num_seeds=5, return_weights=False):
         #test_scores.append(test_score)
         
         all_models.append(models[0])
+        dms.append(dm)
 
     if return_weights:
-        return val_scores, weights, all_models
+        return val_scores, weights, all_models, dms
     else:
         return val_scores
-
-
-def retrain_best_trial(study, df, cfg, dm=None):
-    # get the best hyperparameters
-    best_params = study.best_params
-    val_scores, weights = train_and_test(df, cfg, best_params, num_seeds=3, return_weights=True)
-
-    return val_scores, weights
 
 
 def get_best_params(study, num_trials=5):
@@ -180,7 +196,7 @@ def train_multiple(param_list, df, cfg):
     top_param_val_scores = []
     for params in tqdm(param_list, desc="Training models with best parameters", disable=len(param_list)==1):
         cfg = merge_params_in_cfg(cfg, params)
-        val_scores, weights, _ = train_and_test(df, cfg, num_seeds=1, 
+        val_scores, weights, _, _ = train_and_test(df, cfg, num_seeds=1, 
                                              return_weights=True)
         top_param_val_scores.append(val_scores[0])
         top_param_weights.append(weights[0])
@@ -231,8 +247,6 @@ def suggest_deep_learning(trial: optuna.trial.Trial):
     rec = {'lr': trial.suggest_loguniform("lr", 1e-5, 5e-3),
             #'min_len': trial.suggest_int("min_len", 2, 128),
             #'train_noise_std': trial.suggest_float("train_noise_std", 0.001, 0.2),
-            #'weight_decay': trial.suggest_float("weight_decay", 0.001, 0.4),
-            #'grad_clip_val': trial.suggest_float("grad_clip_val", 0.1, 5.0),   
             #'train_noise_std': trial.suggest_int("train_noise_std", 0, 2),
             'weight_decay': trial.suggest_discrete_uniform("weight_decay", 0.0, 0.4, 0.02),
             'grad_clip_val': trial.suggest_discrete_uniform("grad_clip_val", 0, 1.5, 0.1), 
@@ -285,17 +299,17 @@ def objective_optuna(trial: optuna.Trial, df, cfg, dms=None):
                 rec["bs"] = trial.suggest_int("bs", 2, 7)
             
             #rec["reduction_factor"] = trial.suggest_discrete_uniform("reduction_factor", 1, 6, 1)
-        elif cfg["model_type"] == "transformer":
-            rec["bs"] = trial.suggest_int("bs", 2, 6)
-        else:
-            rec["bs"] = trial.suggest_int("bs", 2, 8)
+        #elif cfg["model_type"] == "transformer":
+        #    rec["bs"] = trial.suggest_int("bs", 2, 6)
+        #else:
+        rec["bs"] = trial.suggest_int("bs", 2, 8)
             
         if cfg["tune_masking"]:
             rec["randomly_mask_aug"] = trial.suggest_discrete_uniform("randomly_mask_aug", 0.0, 0.2, 0.02)
             
         # dropout if transformer or multilayer rnn
         if cfg["model_type"] == "transformer" or (cfg["model_type"] == "rnn" and  cfg["rnn_layers"] > 1):
-            rec["dropout"] = trial.suggest_discrete_uniform("dropout", 0.0, 0.5, 0.01)
+            rec["dropout"] = trial.suggest_discrete_uniform("dropout", 0.0, 0.2, 0.01)
         
     else:
         if cfg["model_type"] in ("xgb", "rf"):

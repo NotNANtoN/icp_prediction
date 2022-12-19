@@ -6,9 +6,9 @@ import tracemalloc
 import hydra
 import omegaconf
 
-from train_utils import default_args
-from tune_utils import tune, store_study_results, make_study_name, snapshot
-from data_utils import get_seq_list, make_split, make_fold
+from icp_pred.train_utils import default_args
+from icp_pred.tune_utils import tune, store_study_results, make_study_name, snapshot
+from icp_pred.data_utils import get_seq_list, make_split, make_fold
 
 
 @hydra.main(config_path="configs", config_name="tune")

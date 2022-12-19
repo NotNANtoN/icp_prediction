@@ -1,8 +1,6 @@
 import torch
 
-from train_utils import create_model
-from tune_utils import get_val_and_test_metric
-
+from icp_pred.train_utils import create_model
 
 @torch.no_grad()
 def make_model_soup(state_dicts):
@@ -28,5 +26,7 @@ def create_soup_model(cfg, data_module, soup_weights):
 
 def create_and_eval_soup(soup_dm, cfg, weights):
     soup_model = create_soup_model(cfg, soup_dm, weights)
-    soup_val_score, soup_test_score = get_val_and_test_metric(soup_dm, [soup_model], None, cfg)
-    return soup_val_score, soup_test_score
+    from icp_pred.tune_utils import eval_model
+    val_metric = eval_model(soup_dm.regression, [soup_model], [soup_dm], cfg["model_type"], "val",
+                            cfg["norm_targets"])
+    return val_metric

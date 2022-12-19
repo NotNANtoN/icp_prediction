@@ -3,9 +3,10 @@ model_type: "mlp"
 target_name: "ICP_Vital"   # ICP_Vital" , long_icp_hypertension_2, 
 db_name: "UKE"  # "UKE", "MIMIC"
 minutes: 60
+model_size: "base" # "tiny", "small", "base", "large", "xl"
 
 outer_folds: 3
-inner_folds: 4
+inner_folds: 10
 
 auto_lr_find: False
 # data args
@@ -42,11 +43,11 @@ train_noise_std: 0.01
 bs: 8 # 8 best for rnn
 max_len: 1024
 min_len: 0
-block_size: 128
+block_size: 8 #128
 
 
-# training args
 max_epochs: 10
+# training/tuning args
 lr: #0.0001
 use_nan_embed: False
 weight_decay: 0.2

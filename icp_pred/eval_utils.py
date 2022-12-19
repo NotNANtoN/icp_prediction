@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import torch
 import sklearn
+from tqdm import tqdm
 
 
 def get_dl(data_module, dl_type, bs=32):
@@ -19,17 +20,6 @@ def get_dl(data_module, dl_type, bs=32):
     dl = create_dl(ds, bs=bs)    
     return dl
 
-"""
-# legacy
-    if dl_type == "test":
-        dl = data_module.test_dataloader()
-    elif dl_type == "train":
-        dl = data_module.train_dataloader()
-        dl.dataset.train = False
-    else:
-        dl = data_module.val_dataloader()
-    return dl
-"""
 
 def get_mean_train_target(data_module):
     return np.concatenate([pat[~torch.isnan(pat)].numpy() for pat in data_module.train_ds.targets]).mean()
@@ -187,6 +177,144 @@ def calc_metric(model_df):
                                          )
                                         ).mean()
 
+
+
+def clip_and_denorm(dm, pat_targets, pat_preds, 
+                            normalize_targets, clip_targets):
+    train_mean = dm.preprocessor.mean_train_target
+    train_std =  dm.preprocessor.std_train_target
+
+    if hasattr(dm.train_ds, "upper_target_nan_quantile"):
+        upper_target_nan_quantile = dm.train_ds.upper_target_nan_quantile
+        lower_target_nan_quantile = dm.train_ds.lower_target_nan_quantile
+        upper_target_clip_quantile = dm.train_ds.upper_target_clip_quantile
+        lower_target_clip_quantile = dm.train_ds.lower_target_clip_quantile
+            
+            
+    # de-standardize targets if they were standardized in training
+    if normalize_targets:
+        pat_targets = (pat_targets * train_std) + train_mean
+        pat_preds = (pat_preds * train_std) + train_mean
+
+    # clip targets if they were clipped in training
+    if clip_targets and hasattr(dm.train_ds, "upper_target_nan_quantile"):
+        # set to NaN if way too big
+        pat_targets[(pat_targets > upper_target_nan_quantile) | (pat_targets < lower_target_nan_quantile)] = np.nan
+        # clip if too big
+        pat_targets = pat_targets.clip(lower_target_clip_quantile, upper_target_clip_quantile)
+    return pat_preds, pat_targets
+
+
+@torch.inference_mode()
+@torch.amp.autocast("cuda")
+def make_eval_preds(models, dms, block_size, restrict_to_block_size = 0,
+                    clip_targets=1, normalize_targets = 1,
+                    split = "val", dl_model=True):
+    all_preds = []
+    all_targets = []
+    all_raw_inputs = []
+    for model, dm in zip(models, dms):
+        ds = dm.val_ds # train_ds, val_ds, test_ds
+        if split == "val":
+            ds = dm.val_ds
+        elif split == "test":
+            ds = dm.test_ds
+        elif split == "train":
+            ds = dm.train_ds
+
+        if dl_model:    
+            model.cuda()
+            for i in tqdm(range(len(ds))):            
+                pat_raw_inputs = ds.raw_inputs[i].astype(float)
+                pat_inputs = ds.inputs[i].float().cuda()
+                pat_targets = ds.targets[i]
+                #print(pat_inputs.shape, pat_targets.shape)
+
+                if restrict_to_block_size and len(pat_inputs) > block_size:
+                    pat_preds = []
+                    for j in range(0, len(pat_inputs) - block_size + 1):
+                        preds =  model(pat_inputs[j: j + block_size].unsqueeze(0))
+                        pat_preds.append(preds)
+
+                    # take all preds of first batch, then only the final one
+                    pat_preds = [p.squeeze() for p in pat_preds]
+                    if block_size == 1:
+                        pat_preds = torch.stack(pat_preds)
+                    else:
+                        single_preds = torch.stack([p[-1] for p in pat_preds[1:]])
+                        real_preds = torch.cat([pat_preds[0], single_preds], dim=0)
+                        pat_preds = real_preds
+                else:
+                    pat_preds = model(pat_inputs.unsqueeze(0))
+                # to cpu
+                pat_preds = pat_preds.squeeze().float().cpu()
+                # denorm and clip targets
+                pat_preds, pat_targets = clip_and_denorm(dm, pat_targets, pat_preds, 
+                                                                 normalize_targets, clip_targets)
+                # append to list
+                if len(pat_targets) > 0 and np.isnan(pat_targets.numpy()).mean() != 1.0:
+                    all_preds.append(pat_preds)
+                    all_targets.append(pat_targets.squeeze())
+                    all_raw_inputs.append(pat_raw_inputs.squeeze())
+            model.cpu()
+        else:
+            inputs = ds.flat_inputs
+            targets = ds.flat_targets
+            # bring into right shape and avoid NaN targets
+            mask = ~np.isnan(targets)
+            inputs = inputs[mask]
+            targets = targets[mask]
+            # make preds
+            preds = model.predict(inputs)
+            # denorm and clip targets
+            preds, targets = clip_and_denorm(dm, targets, preds, 
+                                             normalize_targets, clip_targets)
+            # append to list
+            all_preds.append(preds)
+            all_targets.append(targets)
+            all_raw_inputs.append(inputs)
+        
+    return all_targets, all_preds, all_raw_inputs
+
+
+def calc_metrics(targets, preds):
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+    flat_targets = torch.cat(targets)
+    not_nan_mask = ~torch.isnan(flat_targets)
+    flat_targets = flat_targets[not_nan_mask]
+    
+    if not isinstance(preds, list):
+        flat_preds = torch.ones_like(flat_targets) * preds
+    else:
+        flat_preds = torch.cat(preds)[not_nan_mask]
+
+    preds = flat_preds.float().numpy()
+    targets = flat_targets.float().numpy()
+    
+    # clinically relevant range
+    clin_min, clin_max = 10, 30
+    clin_mask = (targets >= clin_min) & (targets <= clin_max)
+    clin_targets = targets[clin_mask]
+    clin_preds = preds[clin_mask]
+    
+    metrics = {"mse": mean_squared_error(targets, preds),
+                "mae": mean_absolute_error(targets, preds),
+                "rmse": np.sqrt(mean_squared_error(targets, preds)),
+                "min_abs_error": np.abs(preds - targets).min(),
+                "max_abs_error": np.abs(preds - targets).max(),
+                "hyp_acc": hypertension_acc(targets, preds),
+                "hyp_auc": hypertension_auc(targets, preds),
+                "r2": r2_score(targets, preds),
+                "rmse_clin": np.sqrt(mean_squared_error(clin_targets, clin_preds)),
+                "mae_clin": mean_absolute_error(clin_targets, clin_preds),
+                "hyp_acc_clin": hypertension_acc(clin_targets, clin_preds),
+                "hyp_auc_clin": hypertension_auc(clin_targets, clin_preds),
+              }
+    return metrics, flat_targets, flat_preds
+
+
+
 def r2_score(targets, preds, baseline_target=None):
     if baseline_target is None:
         baseline_target = np.mean(targets)
@@ -248,6 +376,7 @@ def print_all_metrics(df):
     print("MSE: ", test_target_mse)
     print("MAE: ", df.groupby("model_id").apply(lambda pat: np.abs(pat["targets"] - mean_target).mean()).mean())
     print("R2 score: ", 0)
+
 
 def print_all_metrics_pat(df):
     mean_train_target = df["mean_train_target"].iloc[0]

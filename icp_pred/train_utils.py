@@ -32,6 +32,7 @@ def make_train_val_fold(df, cfg, folds, test_df=None, seed=None):
             df = pd.concat(df_list)
         
             dm = create_dm(df, cfg)
+            dm.setup()
             dms.append(dm)
     else:
         if test_df is not None:
@@ -39,6 +40,7 @@ def make_train_val_fold(df, cfg, folds, test_df=None, seed=None):
             df_list = [df, test_df]
             df = pd.concat(df_list)
         dm = create_dm(df, cfg)
+        dm.setup()
         dms.append(dm)
     return dms
 
@@ -99,11 +101,43 @@ def retrain(dev_data, test_data, best_params, cfg, verbose=True):
 
 # define model
 def create_model(model_type, data_module, cfg):
+    import copy
+    cfg = copy.deepcopy(cfg)
+    
+    # assign size
+    if cfg["model_size"] is not None and model_type in ["rnn", "transformer"]:
+        transformer_assignments = {"xt":    {"hidden_size": 32,  "num_transformer_blocks": 3},
+                                   "tiny":  {"hidden_size": 64,  "num_transformer_blocks": 3},
+                                   "small": {"hidden_size": 64,  "num_transformer_blocks": 5},
+                                   "base":  {"hidden_size": 128, "num_transformer_blocks": 5},
+                                   "large": {"hidden_size": 256, "num_transformer_blocks": 5},
+                                   "xl":    {"hidden_size": 512, "num_transformer_blocks": 5},
+                                  }
+        rnn_assignments = {"xt":    {"hidden_size": 64,  "rnn_layers": 1},
+                           "tiny":  {"hidden_size": 128,  "rnn_layers": 1},
+                           "small": {"hidden_size": 128,  "rnn_layers": 2},
+                           "base":  {"hidden_size": 256,  "rnn_layers": 2},
+                           "large": {"hidden_size": 512,  "rnn_layers": 2},
+                           "xl":    {"hidden_size": 1024, "rnn_layers": 2},
+                          }
+        if model_type == "transformer":
+            assignments = transformer_assignments
+        else:
+            assignments = rnn_assignments
+        # put in cfg
+        size_assignment = assignments[cfg["model_size"]]
+        for key in size_assignment:
+            cfg[key] = size_assignment[key]
+
+    
     general_keys = ["weight_decay", "max_epochs", "use_macro_loss",
                     "use_pos_weight", "use_nan_embed", "lr", "use_huber",
-                    "use_static", "freeze_nan_embed", "norm_nan_embed", "nan_embed_size",
-                    "use_nan_embed_transformer", "nan_embed_transformer_n_layers", 
-                    "nan_embed_transformer_n_heads", "dropout"]
+                    "use_static", "freeze_nan_embed",
+                    "norm_nan_embed","nan_embed_size",
+                    "use_nan_embed_transformer",
+                    "nan_embed_transformer_n_layers", 
+                    "nan_embed_transformer_n_heads",
+                    "dropout"]
     # get pos frac for weighting positive targets more
     targets = torch.cat(data_module.train_ds.targets)
     pos_frac = targets[~torch.isnan(targets)].mean()
@@ -162,6 +196,8 @@ def create_trainer(cfg, verbose=True, log=True):
     #logger = pl.loggers.mlflow.MLFlowLogger(
     #    experiment_name='default', 
     #)
+    import logging
+    logging.getLogger("lightning").setLevel(logging.ERROR)
     
     if log:
         wandb_logger = pl.loggers.WandbLogger(name=None, save_dir="wandb", offline=False, id=None,
@@ -187,7 +223,7 @@ def create_trainer(cfg, verbose=True, log=True):
                      }
     if not verbose:
         logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
-        pl.utilities.distributed.log.setLevel(logging.ERROR)
+        #pl.utilities.distributed.log.setLevel(logging.ERROR)
         
     #row_log_interval=k
     #log_save_interval=k
@@ -225,7 +261,7 @@ def train_nn(model_type, data_module, cfg, verbose=True, log=True):
         print("Number of trainable parameters: ", count_parameters(model))
     trainer = create_trainer(cfg, verbose=verbose, log=log)
     # track gradients etc
-    if verbose:
+    if verbose and log:
         trainer.logger.watch(model)
         
     if cfg["auto_lr_find"]:
@@ -292,7 +328,7 @@ def train_classical(model_type, data_module, cfg, verbose=True):
     # prep data to have one time step as input
     inputs = data_module.train_dataloader().dataset.flat_inputs
     targets = data_module.train_dataloader().dataset.flat_targets
-    # bring into right shape and avoid NaN targets
+    # mask out NaN targets
     mask = ~np.isnan(targets)
     inputs = inputs[mask]
     targets = targets[mask]
