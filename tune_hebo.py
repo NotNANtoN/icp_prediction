@@ -5,7 +5,7 @@ from hebo.optimizers.hebo import HEBO
 import sklearn
 import matplotlib.pyplot as plt
 
-from tune_utils import obj
+from icp_pred.tune_utils import obj
 
 
 def obj_hebo(*args, **kwargs):

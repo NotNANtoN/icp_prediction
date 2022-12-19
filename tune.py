@@ -8,6 +8,9 @@ import pandas as pd
 
 @hydra.main(config_path="conf", config_name="config")
 def main(cfg):
+    import logging
+    logging.getLogger("lightning").setLevel(logging.ERROR)
+    
     # transformers to run offline
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     # change to original working directory
@@ -22,6 +25,7 @@ def main(cfg):
     import logging
     import transformers
     logging.getLogger("transformers").setLevel(logging.ERROR)
+    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
 
     import torch
     torch.multiprocessing.set_sharing_strategy('file_system')
@@ -42,10 +46,20 @@ def main(cfg):
     dev_df = df[df["split"] != "test"].copy()
     test_df = df[df["split"] == "test"].copy()
     # setup dms
-    from icp_pred.train_utils import make_train_val_fold
-    dms = make_train_val_fold(dev_df, cfg, cfg["inner_folds"], test_df=test_df, seed=cfg["seed"])
+    prepro_name = f'{cfg["seed"]}{cfg["inner_folds"]}{cfg["train_noise_std"]}{cfg["fill_type"]}{cfg["target_nan_quantile"]}{cfg["target_clip_quantile"]}{cfg["input_nan_quantile"]}{cfg["input_clip_quantile"]}{cfg["block_size"]}{cfg["flat_block_size"]}{cfg["subsample_frac"]}{cfg["randomly_mask_aug"]}{cfg["agg_meds"]}{cfg["norm_targets"]}{cfg["target_name"]}'
+    prepro_name = prepro_name.replace(".", "_")
+    cache_path = path.replace(".parquet", f"_{prepro_name}.pickle")
+    print(cache_path)
+    if not os.path.exists(cache_path):
+        from icp_pred.train_utils import make_train_val_fold
+        dms = make_train_val_fold(dev_df, cfg, cfg["inner_folds"], test_df=test_df, seed=cfg["seed"])
+        torch.save(dms, cache_path)
+    else:
+        dms = torch.load(cache_path)
+        
     # test dataloader
     dm = dms[0]
+
     inputs, targets, lens = next(iter(dm.train_dataloader()))
     #print(dm.feature_names)
     print(inputs.shape, inputs.min(), inputs.max())
@@ -102,7 +116,7 @@ def main(cfg):
     print("Cuda used memory: ", torch.cuda.memory_allocated())
     print("Cuda cached memory: ", torch.cuda.memory_cached())
     from icp_pred.tune_utils import train_and_test
-    dev_training_test_scores, weights, dev_models = train_and_test(dev_test_df, best_cfg, num_seeds=3, return_weights=True)
+    dev_training_test_scores, weights, dev_models, dev_dms = train_and_test(dev_test_df, best_cfg, num_seeds=3, return_weights=True)
     # save scores 
     cross_val_score = study.best_value
     test_score = np.mean(dev_training_test_scores)
@@ -113,19 +127,73 @@ def main(cfg):
     
     
     # get param count
-    model = dev_models[0]
-    count = 0
-    trainable_param_count = 0
-    for n, p in model.named_parameters():
-        #print(n, p.shape, p.numel())
-        count += p.numel()
-        if p.requires_grad:
-            trainable_param_count += p.numel()
-    print(count, trainable_param_count)
+    if cfg["model_type"] in ["rnn", "transformer"]:
+        model = dev_models[0]
+        count = 0
+        trainable_param_count = 0
+        for n, p in model.named_parameters():
+            #print(n, p.shape, p.numel())
+            count += p.numel()
+            if p.requires_grad:
+                trainable_param_count += p.numel()
+        print(count, trainable_param_count)
+        param_df = pd.DataFrame({"Num params": [count],
+                                 "Trainable params": [trainable_param_count] 
+                                },
+                                index=[0],
+                               )
+        param_df.to_csv(f"{folder_name}/num_params.csv")
     
     ####### calculate scores properly!
+    from icp_pred.eval_utils import make_eval_preds, calc_metrics
+    all_metrics = []
+    for dev_model, dev_dm in zip(dev_models, dev_dms):
+        all_targets, all_preds, all_raw_inputs = make_eval_preds([dev_model], [dev_dm],
+                                                                 best_cfg["block_size"],
+                                                                 restrict_to_block_size=best_cfg["block_size"] <= 16,
+                                                                 clip_targets=True, 
+                                                                 normalize_targets=best_cfg["norm_targets"],
+                                                                 split = "val",
+                                                                 dl_model=cfg["model_type"] in ["rnn", "transformer"],
+                                                                )
+        used_targets = []
+        used_preds = []
+        for i, t in enumerate(all_targets):
+            if len(t.shape) > 0:
+                used_targets.append(t)
+                used_preds.append(all_preds[i])
+                
+        
+        metrics, flat_targets, flat_preds = calc_metrics(used_targets, used_preds)
+        all_metrics.append(metrics)
+    metrics_df = pd.DataFrame(all_metrics)
+    metrics_df.to_csv(f"{folder_name}/metrics_clipped.csv")
+    metrics_df.mean().to_csv(f"{folder_name}/metrics_mean_clipped.csv")
+    metrics_df.std().to_csv(f"{folder_name}/metrics_std_clipped.csv")
+
+    ### without target clipping
+    all_metrics = []
+    for dev_model, dev_dm in zip(dev_models, dev_dms):
+        all_targets, all_preds, all_raw_inputs = make_eval_preds([dev_model], [dev_dm], best_cfg["block_size"],
+                                                                 restrict_to_block_size = best_cfg["block_size"] <= 16,
+                                                                 clip_targets=False, normalize_targets=best_cfg["norm_targets"],
+                                                                 split = "val",)
+        used_targets = []
+        used_preds = []
+        for i, t in enumerate(all_targets):
+            if len(t.shape) > 0:
+                used_targets.append(t)
+                used_preds.append(all_preds[i])
+                
+        
+        metrics, flat_targets, flat_preds = calc_metrics(used_targets, used_preds)
+        #metrics, flat_targets, flat_preds = calc_metrics(all_targets, all_preds)
+        all_metrics.append(metrics)
+    metrics_df = pd.DataFrame(all_metrics)
+    metrics_df.to_csv(f"{folder_name}/metrics.csv")
+    metrics_df.mean().to_csv(f"{folder_name}/metrics_mean.csv")
+    metrics_df.std().to_csv(f"{folder_name}/metrics_std.csv")
     
-    # TODO: calculate scores properly, calculate more metrics!
     
     # done here, after this is just commented out experimental code
     
