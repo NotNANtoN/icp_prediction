@@ -1,4 +1,5 @@
 import sys
+import math
 
 from captum.attr import NoiseTunnel, Saliency, IntegratedGradients
 from tqdm import tqdm
@@ -7,8 +8,29 @@ import torch
 
 sys.path.append("../artemis")
 
-import utils
-#from src.models import LitBlockLSTM, LitLSTM
+
+def pad_and_mask(data, mask_value=math.nan, attr=False):
+    if attr:
+        #data = [pat.squeeze() for pat in data]
+        #data = [pat.unsqueeze(0) if len(pat.shape) == 1 else pat for pat in data]
+
+        # find max seq len
+        max_len = max([pat.shape[0] for pat in data])
+        # pad each seq to max seq len
+        data = [np.concatenate([pat, np.zeros([ max_len - pat.shape[0], pat.shape[1]]) * math.nan], axis=0) for pat in data]
+        # concat all seqs
+        data = np.stack(data)
+        #data = torch.nn.utils.rnn.pad_sequence(data, batch_first=True, padding_value=mask_value)
+        if math.isnan(mask_value):
+            mask = np.isnan(data)
+        else:
+            mask = data == mask_value
+        data = np.ma.masked_array(data, mask=mask)
+    else:
+        data = torch.nn.utils.rnn.pad_sequence(data, batch_first=True, padding_value=mask_value)
+        data = np.ma.masked_array(data, mask=(data == mask_value))
+
+    return data
 
 
 class LSTMLastStep(torch.nn.Module):
@@ -20,7 +42,7 @@ class LSTMLastStep(torch.nn.Module):
         out = self.net(x)
         # take last timestep
         out = out[:, -1, :]
-        return out
+        return out.unsqueeze(1)
 
 
 class LSTMSelectFeature(torch.nn.Module):
@@ -51,8 +73,13 @@ class LSTMMeanStep(torch.nn.Module):
 
 
 
-def get_sal_model(model, idx=None, ig=False, noise_tunnel=True):
-    wrapped_model = LSTMSelectFeature(LSTMMeanStep(model), idx)
+def get_sal_model(model, idx=None, ig=False, noise_tunnel=True, last_step=False):
+    if last_step:
+        # get the last prediction instead of the mean prediction
+        wrapped_model = LSTMLastStep(model)
+    else:
+        wrapped_model = LSTMMeanStep(model)
+    wrapped_model = LSTMSelectFeature(wrapped_model, idx)
     #else:
     #    wrapped_model = LSTMSelectFeature(model, idx)
     if ig:
@@ -109,7 +136,7 @@ def calc_median(ds, per_step=False):
             pat_data, _, _, len_ = ds[pat_id]
             pat_data = pat_data[:len_]
             pats.append(pat_data)    
-    padded_pats = utils.pad_and_mask(pats, attr=True)
+    padded_pats = pad_and_mask(pats, attr=True)
 
     median_per_step = np.ma.median(padded_pats, 0)
 
@@ -171,26 +198,30 @@ def get_all_attrs(model, absolute=False, target_idx=None, desired_target_val=Non
             attrs.append(attr)
         #print("Attr shape: ", attr.shape)
     if agg:
-        attrs = utils.pad_and_mask(attrs, attr=True)
+        attrs = pad_and_mask(attrs, attr=True)
         
         print("All attrs shape: ", attrs.shape)
     return attrs
 
 
 def get_attr_single(model, pat_id, absolute=False, target_idx=None, ds=None, ig=False, 
-                    baseline_data=None, sg_std=0.01, noise_tunnel=True, max_len=0):
-    if ds is None:
-        ds = model.val_dataloader().dataset
-
+                    baseline_data=None, sg_std=0.01, noise_tunnel=True, max_len=0, pat_data=None,
+                    last_step=False):
+    
+    if torch.is_tensor(baseline_data):
+        baseline_data = baseline_data.detach().clone()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     model.to(device)
     if target_idx is None:
         target_idx = 0
-    model = get_sal_model(model, target_idx, noise_tunnel=noise_tunnel, ig=ig)
+    model = get_sal_model(model, target_idx, noise_tunnel=noise_tunnel, ig=ig, last_step=last_step)
         
-        
-    pat_data, _ = ds[pat_id]
+    if pat_data is None:
+        if ds is None:
+            ds = model.val_dataloader().dataset
+        pat_data, _ = ds[pat_id]
+    
     if max_len > 0:
         pat_data_chunks = torch.split(pat_data, max_len, dim=0)
     else:
@@ -222,13 +253,15 @@ def get_attr_single(model, pat_id, absolute=False, target_idx=None, ds=None, ig=
             attr_kwargs["nt_samples"] = 50
             attr_kwargs["nt_type"] = "smoothgrad"
             attr_kwargs["stdevs"] = sg_std
+            attr_kwargs["nt_samples_batch_size"] = 8
         if ig:
             attr_kwargs["n_steps"] = 50
             attr_kwargs["baselines"] = baseline_data
-            attr_kwargs["internal_batch_size"] = 256
+            attr_kwargs["internal_batch_size"] = 4
         else:
             attr_kwargs["abs"] = absolute
         # calc attribution
+        #print(pat_data.shape)
         attrs = model.attribute(pat_data, **attr_kwargs)
         attrs = attrs.detach().cpu().squeeze(0).numpy()
         pat_data = pat_data.detach().cpu()

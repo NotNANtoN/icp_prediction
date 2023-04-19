@@ -6,6 +6,8 @@ import torch
 import sklearn
 from tqdm import tqdm
 
+from icp_pred.saliency import get_attr_single
+
 
 def get_dl(data_module, dl_type, bs=32):
     if dl_type == "test":
@@ -142,17 +144,19 @@ def hypertension_acc(targets, preds):
     hyper_acc = (hyper_targets == hyper_preds).astype(float).mean()
     return hyper_acc
 
+
 from sklearn.metrics import roc_auc_score
 def hypertension_auc(targets, preds):
     thresh = 22
     targets = targets > thresh
+    #preds = preds > thresh
     #targets = targets.numpy()
     #preds = preds.flatten.numpy()
     auc = roc_auc_score(targets, preds)
     return auc
 
 
-def hypertension_prec_rec(targets, preds):
+def hypertension_prec_rec_spec(targets, preds):
     thresh = 22
     hyper_targets = targets > thresh
     hyper_preds = preds > thresh
@@ -166,7 +170,19 @@ def hypertension_prec_rec(targets, preds):
     spec = TN / (TN + FP) if (TN + FP) != 0 else np.nan
     prec = TP / (TP + FP) if (TP + FP) != 0 else np.nan
     rec = sens
-    return prec, rec
+    return prec, rec, spec
+
+
+from sklearn.metrics import recall_score
+def hypertension_specificity(targets, preds):
+    thresh = 22
+    targets = targets > thresh
+    #targets = targets.numpy()
+    #preds = preds.flatten.numpy()
+    spec = recall_score(targets, preds, pos_label=0)
+    return spec
+
+
 
 
 def calc_metric(model_df):
@@ -180,7 +196,7 @@ def calc_metric(model_df):
 
 
 def clip_and_denorm(dm, pat_targets, pat_preds, 
-                            normalize_targets, clip_targets):
+                    normalize_targets, clip_targets):
     train_mean = dm.preprocessor.mean_train_target
     train_std =  dm.preprocessor.std_train_target
 
@@ -189,8 +205,7 @@ def clip_and_denorm(dm, pat_targets, pat_preds,
         lower_target_nan_quantile = dm.train_ds.lower_target_nan_quantile
         upper_target_clip_quantile = dm.train_ds.upper_target_clip_quantile
         lower_target_clip_quantile = dm.train_ds.lower_target_clip_quantile
-            
-            
+                
     # de-standardize targets if they were standardized in training
     if normalize_targets:
         pat_targets = (pat_targets * train_std) + train_mean
@@ -205,14 +220,24 @@ def clip_and_denorm(dm, pat_targets, pat_preds,
     return pat_preds, pat_targets
 
 
-@torch.inference_mode()
 @torch.amp.autocast("cuda")
 def make_eval_preds(models, dms, block_size, restrict_to_block_size = 0,
                     clip_targets=1, normalize_targets = 1,
-                    split = "val", dl_model=True):
+                    split = "val", dl_model=True,
+                    return_saliency=False,
+                    deleted_feature_idcs=None,
+                    deletion_prob=1.0,
+                    fill_type="median",
+                    verbose=True,
+                    sal_kwargs=None,
+                   ):
+    if sal_kwargs is None:
+        sal_kwargs = {}
     all_preds = []
     all_targets = []
     all_raw_inputs = []
+    all_inputs = []
+    all_saliencies = []
     for model, dm in zip(models, dms):
         ds = dm.val_ds # train_ds, val_ds, test_ds
         if split == "val":
@@ -224,39 +249,72 @@ def make_eval_preds(models, dms, block_size, restrict_to_block_size = 0,
 
         if dl_model:    
             model.cuda()
-            for i in tqdm(range(len(ds))):            
+            for i in tqdm(range(len(ds)), disable=verbose == False):            
                 pat_raw_inputs = ds.raw_inputs[i].astype(float)
                 pat_inputs = ds.inputs[i].float().cuda()
                 pat_targets = ds.targets[i]
                 #print(pat_inputs.shape, pat_targets.shape)
-
-                if restrict_to_block_size and len(pat_inputs) > block_size:
-                    pat_preds = []
-                    for j in range(0, len(pat_inputs) - block_size + 1):
-                        preds =  model(pat_inputs[j: j + block_size].unsqueeze(0))
-                        pat_preds.append(preds)
-
-                    # take all preds of first batch, then only the final one
-                    pat_preds = [p.squeeze() for p in pat_preds]
-                    if block_size == 1:
-                        pat_preds = torch.stack(pat_preds)
+                
+                # if we are perturbing the input to measure robustness to features, do so here
+                if deleted_feature_idcs is not None:
+                    # pat_inputs shape = [seq_len, num_feats]
+                    # either median or NaN
+                    num_feats_deleted = len(deleted_feature_idcs)
+                    if fill_type == "none":
+                        fill_values = torch.zeros(num_feats_deleted) * torch.nan
                     else:
-                        single_preds = torch.stack([p[-1] for p in pat_preds[1:]])
-                        real_preds = torch.cat([pat_preds[0], single_preds], dim=0)
-                        pat_preds = real_preds
-                else:
-                    pat_preds = model(pat_inputs.unsqueeze(0))
+                        median = torch.tensor(dm.preprocessor.median[deleted_feature_idcs])
+                        mean = torch.tensor(dm.preprocessor.mean[deleted_feature_idcs])
+                        std = torch.tensor(dm.preprocessor.std[deleted_feature_idcs])
+                        
+                        fill_values = (median - mean) / std
+                    # bring to right shape
+                    fill_values = fill_values.reshape(1, num_feats_deleted).float()
+                    fill_values = fill_values.repeat(pat_inputs.shape[0], 1)
+                    # make deletion mask
+                    deletion_mask = torch.rand_like(fill_values) <= deletion_prob
+                    # replace fill_values with original values where we do not delete
+                    # (do it here because pat_inpust[:, deleted_feature_idcs][deletion_mask] creates a copy of pat_inputs, so we cannot reassign)
+                    fill_values[deletion_mask] = pat_inputs[:, deleted_feature_idcs][deletion_mask].cpu().float()
+                    # insert
+                    pat_inputs[:, deleted_feature_idcs] = fill_values.float().to(pat_inputs.device)
+                
+                # make prediction
+                with torch.no_grad():
+                    if restrict_to_block_size and len(pat_inputs) > block_size:
+                        pat_preds = []
+                        for j in range(0, len(pat_inputs) - block_size + 1):
+                            preds =  model(pat_inputs[j: j + block_size].unsqueeze(0))
+                            pat_preds.append(preds)
+
+                        # take all preds of first batch, then only the final one
+                        pat_preds = [p.squeeze() for p in pat_preds]
+                        if block_size == 1:
+                            pat_preds = torch.stack(pat_preds)
+                        else:
+                            single_preds = torch.stack([p[-1] for p in pat_preds[1:]])
+                            real_preds = torch.cat([pat_preds[0], single_preds], dim=0)
+                            pat_preds = real_preds
+                    else:
+                        pat_preds = model(pat_inputs.unsqueeze(0))
                 # to cpu
                 pat_preds = pat_preds.squeeze().float().cpu()
                 # denorm and clip targets
                 pat_preds, pat_targets = clip_and_denorm(dm, pat_targets, pat_preds, 
-                                                                 normalize_targets, clip_targets)
+                                                         normalize_targets, clip_targets)
                 # append to list
                 if len(pat_targets) > 0 and np.isnan(pat_targets.numpy()).mean() != 1.0:
-                    all_preds.append(pat_preds)
-                    all_targets.append(pat_targets.squeeze())
-                    all_raw_inputs.append(pat_raw_inputs.squeeze())
+                    all_preds.append(pat_preds.numpy())
+                    all_targets.append(pat_targets.squeeze().numpy())
+                    all_raw_inputs.append(pat_raw_inputs)
+                    all_inputs.append(pat_inputs.cpu())
+                    if return_saliency:
+                        model.train()
+                        sal = get_attr_single(model, pat_id=None, max_len=128, pat_data=pat_inputs, **sal_kwargs)
+                        all_saliencies.append(sal)
+                        model.eval()
             model.cpu()
+            
         else:
             inputs = ds.flat_inputs
             targets = ds.flat_targets
@@ -273,24 +331,33 @@ def make_eval_preds(models, dms, block_size, restrict_to_block_size = 0,
             all_preds.append(preds)
             all_targets.append(targets)
             all_raw_inputs.append(inputs)
-        
-    return all_targets, all_preds, all_raw_inputs
+            
+            
+    out_list = [all_targets, all_preds, all_raw_inputs]
+            
+    if return_saliency:
+        out_list.append(all_inputs)
+        out_list.append(all_saliencies)
+    return out_list
 
 
 def calc_metrics(targets, preds):
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-
-    flat_targets = torch.cat(targets)
-    not_nan_mask = ~torch.isnan(flat_targets)
+    
+    #targets = [t if hasattr(t, "__len__") else [t.tolist()] for t in targets]
+    targets = [t if len(t.shape) > 0 else [t.tolist()] for t in targets]
+    flat_targets = np.concatenate(targets)
+    not_nan_mask = ~np.isnan(flat_targets)
     flat_targets = flat_targets[not_nan_mask]
     
-    if not isinstance(preds, list):
-        flat_preds = torch.ones_like(flat_targets) * preds
+    if isinstance(preds, float):
+        flat_preds = np.ones_like(flat_targets) * preds
     else:
-        flat_preds = torch.cat(preds)[not_nan_mask]
+        preds = [t if len(t.shape) > 0 else [t.tolist()] for t in preds]
+        flat_preds = np.concatenate(preds)[not_nan_mask]
 
-    preds = flat_preds.float().numpy()
-    targets = flat_targets.float().numpy()
+    preds = flat_preds
+    targets = flat_targets
     
     # clinically relevant range
     clin_min, clin_max = 10, 30
@@ -355,8 +422,8 @@ def print_all_metrics(df):
     print("R2: ", df_nona.groupby("model_id").apply(lambda pat: r2_score(pat["targets"], pat["preds"], baseline_target=mean_target)).mean())
     print("R2 old: ", sklearn.metrics.r2_score(targets, preds))
     print("Accuracy for hypertension: ", hypertension_acc(targets, preds).mean())#.groupby("model_id").apply(lambda pat: hypertension_acc(pat["targets"], pat["preds"])).mean())
-    print("Precision for hypertension: ", df_nona.groupby("model_id").apply(lambda pat: hypertension_prec_rec(pat["targets"], pat["preds"])[0]).mean())
-    print("Recall for hypertension: ", df_nona.groupby("model_id").apply(lambda pat: hypertension_prec_rec(pat["targets"], pat["preds"])[1]).mean())
+    print("Precision for hypertension: ", df_nona.groupby("model_id").apply(lambda pat: hypertension_prec_rec_spec(pat["targets"], pat["preds"])[0]).mean())
+    print("Recall for hypertension: ", df_nona.groupby("model_id").apply(lambda pat: hypertension_prec_rec_spec(pat["targets"], pat["preds"])[1]).mean())
     print()
 
     train_target_mse = df.groupby("model_id").apply(lambda pat: (pat["targets"] - mean_train_target).pow(2).mean()).mean()
@@ -411,8 +478,8 @@ def print_all_metrics_pat(df):
     print("R2 custom: ", 1 - pred_mse / test_target_mse)
     print("R2: ", df_nona.groupby("ids").apply(lambda pat: r2_score(pat["targets"], pat["preds"], baseline_target=mean_target)).mean())
     print("Accuracy for hypertension: ", df_nona.groupby("ids").apply(lambda pat: hypertension_acc(pat["targets"], pat["preds"])).mean())
-    print("Precision for hypertension: ", df_nona.groupby("ids").apply(lambda pat: hypertension_prec_rec(pat["targets"], pat["preds"])[0]).mean())
-    print("Recall for hypertension: ", df_nona.groupby("ids").apply(lambda pat: hypertension_prec_rec(pat["targets"], pat["preds"])[1]).mean())
+    print("Precision for hypertension: ", df_nona.groupby("ids").apply(lambda pat: hypertension_prec_rec_spec(pat["targets"], pat["preds"])[0]).mean())
+    print("Recall for hypertension: ", df_nona.groupby("ids").apply(lambda pat: hypertension_prec_rec_spec(pat["targets"], pat["preds"])[1]).mean())
     print()
 
     train_target_mse = df.groupby("ids").apply(lambda pat: (pat["targets"] - mean_train_target).pow(2).mean()).mean()

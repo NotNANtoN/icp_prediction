@@ -356,10 +356,14 @@ class Preprocessor():
     
 
 class SeqDataModule(pytorch_lightning.LightningDataModule):
-    def __init__(self, df,
-                 batch_size: int = 32, random_starts=False, 
-                 min_len=10, train_noise_std=0.0, 
-                 fill_type="pat_ema", flat_block_size=0, 
+    def __init__(self, 
+                 df,
+                 batch_size: int = 32, 
+                 random_starts=False, 
+                 min_len=10, 
+                 train_noise_std=0.0, 
+                 fill_type="pat_ema", 
+                 flat_block_size=0, 
                  target_name = "ICP_Vital", 
                  target_nan_quantile=0,
                  target_clip_quantile=0,
@@ -371,6 +375,7 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
                  randomly_mask_aug=0.0,
                  agg_meds=False,
                  norm_targets=True,
+                 add_diagnosis_features=False,
                 ):
         super().__init__()
         
@@ -405,7 +410,9 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
             # remove CPP as it is dependent on ICP and we want to predict ICP
             icp_cols = [col for col in df.columns if "ICP" in col]
             cpp_cols = [col for col in df.columns if "CPP" in col]
-            drop_cols = icp_cols + cpp_cols + diagnose_cols 
+            drop_cols = icp_cols + cpp_cols
+            if not add_diagnosis_features:
+                drop_cols += diagnose_cols
             df["target"] = df[target_name]
             df = df.drop(columns=drop_cols)
         elif target_name.startswith("long_icp_hypertension"):
@@ -443,7 +450,10 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
             # assign to column
             df["target"] = list(targets)
             # drop columns
-            drop_cols = diagnose_cols 
+            if add_diagnosis_features:
+                drop_cls = []
+            else:
+                drop_cols = diagnose_cols 
             df = df.drop(columns=drop_cols)
         elif target_name in df.columns:
             if target_name == "Geschlecht":
@@ -451,6 +461,9 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
             else:
                 self.regression = True
             df["target"] = df[target_name]
+            drop_cols = [target_name]
+            if not add_diagnosis_features:
+                drop_cols += diagnose_cols
             df = df.drop(columns=[target_name])
         
         # apply splits
@@ -458,6 +471,7 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
         train_data = df[df["split"] == "train"].drop(columns=["split"])
         val_data = df[df["split"] == "val"].drop(columns=["split"])
         test_data = df[df["split"] == "test"].drop(columns=["split"])
+        
         
         non_input_cols = ["Pat_ID", "target", "window_id"]
         input_cols = [col for col in train_data.columns if col not in non_input_cols]
@@ -531,6 +545,16 @@ class SeqDataModule(pytorch_lightning.LightningDataModule):
     def test_dataloader(self):
         eval_bs = max(self.batch_size // 8, 4)
         return create_dl(self.test_ds, bs=eval_bs) if self.test_ds is not None else None
+    
+    def set_block_size(self, block_size, flat_block_size):
+        flat_size_changed = self.flat_block_size != flat_block_size
+        self.flat_block_size = flat_block_size
+        self.block_size = block_size
+        for ds in self.datasets:
+            ds.block_size = block_size
+            ds.flat_block_size = flat_block_size
+        if flat_size_changed:
+            self.make_flat_arrays()
 
         
 class SequenceDataset(torch.utils.data.Dataset):

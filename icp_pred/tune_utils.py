@@ -11,7 +11,7 @@ import optuna
 
 from icp_pred.train_utils import train_model
 from icp_pred.data_utils import SeqDataModule
-from icp_pred.eval_utils import get_all_dfs
+from icp_pred.eval_utils import get_all_dfs, make_eval_preds, calc_metrics
 
 
 def obj(df, cfg, opt_object, num_seeds=1, split="val", dms=None):
@@ -63,7 +63,37 @@ def train_and_eval_model(df, cfg, split, log=True, dms=None):
         dms = make_train_val_fold(df, cfg, cfg["inner_fold"])
     # train model on datamodule
     models, _ = train_model(cfg["model_type"], dms, cfg, verbose=False, log=log)
-    metric = eval_model(dms[0].regression, models, dms, cfg["model_type"], split, cfg["norm_targets"])
+    
+    metric = eval_model_new(models, dms, cfg, split)
+    #metric = eval_model(dms[0].regression, models, dms, cfg["model_type"], split, cfg["norm_targets"])
+    return metric
+
+
+def eval_model_new(models, dms, cfg, split):
+    from icp_pred.eval_utils import make_eval_preds, calc_metrics
+    
+    # calc metrics
+    all_metrics = []
+    for model, dm in zip(models, dms):
+        all_targets, all_preds, all_raw_inputs = make_eval_preds([model], [dm], cfg["block_size"],
+                                                                 restrict_to_block_size = cfg["block_size"] <= 16,
+                                                                 clip_targets=True, 
+                                                                 normalize_targets=cfg["norm_targets"],
+                                                                 split = split,
+                                                                 dl_model=cfg["model_type"] in ["rnn", "transformer"],
+                                                                )
+        used_targets = []
+        used_preds = []
+        for i, t in enumerate(all_targets):
+            if len(t.shape) > 0:
+                used_targets.append(t)
+                used_preds.append(all_preds[i])
+        
+        metrics, flat_targets, flat_preds = calc_metrics(used_targets, used_preds)
+        #metrics, flat_targets, flat_preds = calc_metrics(all_targets, all_preds)
+        all_metrics.append(metrics)
+    metrics_df = pd.DataFrame(all_metrics)
+    metric = metrics_df.mean()["mse"]
     return metric
 
 
@@ -99,25 +129,6 @@ def setup_dm_and_train(df, cfg, log=True):
     models, trainers = train_model(cfg["model_type"], [dm], cfg, verbose=False, log=log)
     return dm, models, trainers
 
-
-def eval_model_new_no_xgb(models, dms):
-    from icp_pred.eval_utils import make_eval_preds, calc_metrics
-
-    out = make_eval_preds(models, dms,
-                         cfg["block_size"],
-                         restrict_to_block_size=cfg["block_size"] <= 16,                 
-                         clip_targets=1,
-                         normalize_targets=cfg["norm_targets"],
-                         split = "val",)
-    all_targets, all_preds, all_raw_inputs = out
-    
-    try:
-        metrics, flat_targets, flat_preds = calc_metrics(all_targets, all_preds)
-        score = metrics["mse"]
-    except ValueError:
-        score = 200
-
-    return score
     
 
 def eval_model(regression, models, data_modules, model_type, split, norm_targets):
@@ -164,7 +175,8 @@ def train_and_test(df, cfg, num_seeds=5, return_weights=False):
     for seed in tqdm(range(cfg["seed"], cfg["seed"] + num_seeds), desc="Training models with best parameters", disable=num_seeds==1):
         cfg["seed"] = seed
         dm, models, _ = setup_dm_and_train(df, cfg, log=False)
-        val_score = eval_model(dm.regression, models, [dm], cfg["model_type"], "val", cfg["norm_targets"])
+        #val_score = eval_model(dm.regression, models, [dm], cfg["model_type"], "val", cfg["norm_targets"])
+        val_score = eval_model_new(models, [dm], cfg, split="val")
         
         if hasattr(models[0], "state_dict") and return_weights:
             model_weights = models[0].state_dict()  # get weights of the model
@@ -270,10 +282,14 @@ def suggest_tree(trial):
     return rec
 
 
-def suggest_logreg(trial):
+def suggest_linear(trial):
     # suggest hyperparameters for sklearn logistic regression
-    rec = {'C': trial.suggest_loguniform("C", 0.00005, 10.0),
-           'max_iter': trial.suggest_int("max_iter", 10, 500),
+    #rec = {'C': trial.suggest_loguniform("C", 0.00005, 10.0),
+    #       'max_iter': trial.suggest_int("max_iter", 10, 500),
+    #       'l1_ratio': trial.suggest_discrete_uniform("l1_ratio", 0.0, 1.0, 0.05),}
+    
+    # suggest parameters for regression
+    rec = {'alpha': trial.suggest_loguniform("alpha", 0.00005, 100.0),
            'l1_ratio': trial.suggest_discrete_uniform("l1_ratio", 0.0, 1.0, 0.05),}
     return rec
 
@@ -302,7 +318,8 @@ def objective_optuna(trial: optuna.Trial, df, cfg, dms=None):
         #elif cfg["model_type"] == "transformer":
         #    rec["bs"] = trial.suggest_int("bs", 2, 6)
         #else:
-        rec["bs"] = trial.suggest_int("bs", 2, 8)
+        #rec["bs"] = trial.suggest_int("bs", 2, 8)
+        rec["bs"] = trial.suggest_int("bs", 2, 4)
             
         if cfg["tune_masking"]:
             rec["randomly_mask_aug"] = trial.suggest_discrete_uniform("randomly_mask_aug", 0.0, 0.2, 0.02)
@@ -315,7 +332,7 @@ def objective_optuna(trial: optuna.Trial, df, cfg, dms=None):
         if cfg["model_type"] in ("xgb", "rf"):
             rec = suggest_tree(trial)
         elif cfg["model_type"] == "linear":
-            rec = suggest_logreg(trial)
+            rec = suggest_linear(trial)
 
         if cfg["flat_block_size_range"] > 1:
             rec["flat_block_size"] =  trial.suggest_discrete_uniform("flat_block_size", 0, cfg["flat_block_size_range"], 1)

@@ -46,16 +46,28 @@ def main(cfg):
     dev_df = df[df["split"] != "test"].copy()
     test_df = df[df["split"] == "test"].copy()
     # setup dms
-    prepro_name = f'{cfg["seed"]}{cfg["inner_folds"]}{cfg["train_noise_std"]}{cfg["fill_type"]}{cfg["target_nan_quantile"]}{cfg["target_clip_quantile"]}{cfg["input_nan_quantile"]}{cfg["input_clip_quantile"]}{cfg["block_size"]}{cfg["flat_block_size"]}{cfg["subsample_frac"]}{cfg["randomly_mask_aug"]}{cfg["agg_meds"]}{cfg["norm_targets"]}{cfg["target_name"]}'
+    prepro_name = f'{cfg["seed"]}{cfg["inner_folds"]}{cfg["train_noise_std"]}{cfg["fill_type"]}{cfg["target_nan_quantile"]}{cfg["target_clip_quantile"]}{cfg["input_nan_quantile"]}{cfg["input_clip_quantile"]}{cfg["subsample_frac"]}{cfg["randomly_mask_aug"]}{cfg["agg_meds"]}{cfg["norm_targets"]}{cfg["target_name"]}'
     prepro_name = prepro_name.replace(".", "_")
     cache_path = path.replace(".parquet", f"_{prepro_name}.pickle")
     print(cache_path)
     if not os.path.exists(cache_path):
         from icp_pred.train_utils import make_train_val_fold
         dms = make_train_val_fold(dev_df, cfg, cfg["inner_folds"], test_df=test_df, seed=cfg["seed"])
-        torch.save(dms, cache_path)
+        try:
+            torch.save(dms, cache_path)
+        except OverflowError:
+            print("Could not save file because it is too large")
     else:
-        dms = torch.load(cache_path)
+        try:
+            dms = torch.load(cache_path)
+        except RuntimeError:
+            from icp_pred.train_utils import make_train_val_fold
+            dms = make_train_val_fold(dev_df, cfg, cfg["inner_folds"], test_df=test_df, seed=cfg["seed"])
+            torch.save(dms, cache_path)
+        except FileNotFoundError:
+            from icp_pred.train_utils import make_train_val_fold
+            dms = make_train_val_fold(dev_df, cfg, cfg["inner_folds"], test_df=test_df, seed=cfg["seed"])
+            torch.save(dms, cache_path)
         
     # test dataloader
     dm = dms[0]
@@ -177,7 +189,9 @@ def main(cfg):
         all_targets, all_preds, all_raw_inputs = make_eval_preds([dev_model], [dev_dm], best_cfg["block_size"],
                                                                  restrict_to_block_size = best_cfg["block_size"] <= 16,
                                                                  clip_targets=False, normalize_targets=best_cfg["norm_targets"],
-                                                                 split = "val",)
+                                                                 split = "val",
+                                                                 dl_model=cfg["model_type"] in ["rnn", "transformer"],
+                                                                )
         used_targets = []
         used_preds = []
         for i, t in enumerate(all_targets):
@@ -260,46 +274,6 @@ def main(cfg):
             external_eval_dict["std_score"].append(std_test_score)
         external_eval_df = pd.DataFrame(external_eval_dict, index=list(range(len(external_eval_dict["db_name"]))))
         external_eval_df.to_csv(f"{folder_name}/scores_external.csv")
-        
-        
-    
-    
-    
-    # test the souping approach:
-    if 1 == 0 and cfg["model_type"] in ["rnn", "gpt", "mlp"]:
-        from soup_utils import create_and_eval_soup
-    
-        
-        from icp_pred.train_utils import create_dm
-        #soup_dms = make_train_val_fold(dev_df, soup_cfg, cfg["inner_folds"], test_df=test_df)
-        soup_cfg = merge_params_in_cfg(cfg, study.best_params)
-        soup_dm = create_dm(dev_test_df, soup_cfg)
-        #soup_dm = setup_dm(df, soup_cfg)
-
-        # make soup of different seeds of the best hyperparam set
-        soup_test_score = create_and_eval_soup(soup_dm, soup_cfg, weights)
-        # save scores of soup model
-        soup_scores_df = pd.DataFrame({#"val_score": [soup_val_score], 
-                                    "test_score": [soup_test_score],
-                                    "average_ind_test_score": [np.mean(dev_training_test_scores)],
-                                    })
-        soup_scores_df.to_csv(f"{folder_name}/best_param_seed_soup_scores.csv", index=False)
-
-        # get params of some of the best optuna trials to create a soup from
-        from icp_pred.tune_utils import get_best_params, train_multiple
-        top_params, top_vals = get_best_params(study, num_trials=5)
-        top_param_val_scores, top_param_weights = train_multiple(top_params, df, cfg)
-        
-        # soup of some of the best hyperparameter sets
-        soup_test_score = create_and_eval_soup(soup_dm, soup_cfg, top_param_weights[:5])
-        # save scores of soup model
-        soup_scores_df = pd.DataFrame({#"val_score": [soup_val_score],
-                                    "test_score": [soup_test_score],
-                                    "average_ind_val_score": [np.mean(top_param_val_scores)],
-                                    #"average_ind_test_score": [np.mean(top_param_test_scores)],
-                                    "average_val_score_from_tuning": [np.mean(top_vals)],
-                                    })
-        soup_scores_df.to_csv(f"{folder_name}/top_param_soup_scores.csv", index=False)
 
     return test_score
 

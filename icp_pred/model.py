@@ -16,7 +16,7 @@ class LitSeqModel(pl.LightningModule):
                  use_static=True, freeze_nan_embed=False, norm_nan_embed=False, 
                  nan_embed_size=512, use_nan_embed_transformer=False, 
                  nan_embed_transformer_n_layers=3, 
-                 nan_embed_transformer_n_heads=8, dropout=0.2):
+                 nan_embed_transformer_n_heads=8, dropout=0.2, low_mem_mode=False):
         super().__init__()        
         self.regression = regression
         self.use_macro_loss = use_macro_loss
@@ -59,10 +59,10 @@ class LitSeqModel(pl.LightningModule):
             from icp_pred.nan_emb import NanEmbed, NanEmbedTransformer
             emb_size = self.nan_embed_size
             if use_nan_embed_transformer:
-                self.embed = NanEmbedTransformer(self.num_inputs, emb_size,
+                self.embed = NanEmbedTransformer(self.num_inputs, emb_size, low_mem_mode,
                 n_layers=nan_embed_transformer_n_layers, n_heads=nan_embed_transformer_n_heads, dropout=self.dropout)
             else:
-                self.embed = NanEmbed(self.num_inputs, emb_size)
+                self.embed = NanEmbed(self.num_inputs, emb_size, low_mem_mode)
 
             if self.freeze_nan_embed:
                 for p in self.embed.parameters():

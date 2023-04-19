@@ -1,3 +1,8 @@
+code_archive/
+archive/
+plots/
+exports/
+multirun/
 .vscode/
 backuptune.py
 hebo_tunings/

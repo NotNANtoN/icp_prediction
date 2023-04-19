@@ -46,6 +46,75 @@ def make_train_val_fold(df, cfg, folds, test_df=None, seed=None):
 
 
 def create_dm(df, cfg):
+    cols = df.columns
+    diagnose = [c for c in cols if "Diagnose" in c]
+    basics = ["split", "window_id", "Pat_ID", "ICP_Vital"]
+    if cfg["only_med_and_demo_features"]:
+        demographics = ["Geschlecht", "Alter", "Größe", "Gewicht", "rel_time"]
+        meds = [col for col in cols if "_Med" in col]
+        keep_cols = basics + diagnose + demographics + meds
+        df = df[keep_cols]    
+        
+    final_gen_feats = ['mittl_Vital',
+                 'syst_Vital',
+                 'rel_time',
+                 'HF_Vital',
+                 'PCO2_BGA',
+                 'FiO2_Vital',
+                 'aPTT_Labor',
+                 'Lac_BGA',
+                 'Thrombocyten_Labor',
+                 'CK_Labor',
+                 'AF_Vital']
+    
+    gen_feats_with_diag = ['syst_Vital',
+                         'diast_Vital',
+                         'PCO2_BGA',
+                         'rel_time',
+                         'Pupille li_Vital',
+                         'PEEP_Vital',
+                         'RASS_Vital',
+                         'Pupille re_Vital',
+                         'GCS_auge_Vital',
+                         'Diagnose_ICH',
+                         'CK_Labor',
+                         'GCS_motor_Vital',
+                         'HCO3_BGA',
+                         'Diagnose_SAH',
+                         'Pmean_Vital',
+                         'sO2_BGA',
+                         'FiO2_Vital',
+                         'Diagnose_TBI',
+                         'Thrombocyten_Labor',
+                         'Albumin_Labor',
+                         'Geschlecht',
+                         'HF_Vital_std',
+                         'Kreatinin_Labor',
+                         'SpO2_Vital',
+                         'EVB_Labor',
+                         'Alter',
+                         'Ca_BGA',
+                         'Lac_BGA']
+
+    if cfg["use_general_features"]:
+        # kick out PEEP and GCS values because they are too different among datasets
+        used_gen_feats = final_gen_feats
+        used_gen_feats = [f for f in used_gen_feats if "PEEP" not in f and "GCS_" not in f and "Pupille" not in f and "Pmean" not in f]
+        keep_cols = basics + diagnose + used_gen_feats
+        df = df[keep_cols]
+    elif cfg["use_general_features_diag"]:
+        # kick out PEEP and GCS values because they are too different among datasets
+        used_gen_feats = gen_feats_with_diag
+        used_gen_feats = [f for f in used_gen_feats if "PEEP" not in f and "GCS_" not in f and "Pupille" not in f and "Pmean" not in f]
+        keep_cols = basics + used_gen_feats
+        df = df[keep_cols]
+    elif cfg["use_general_features_sparse"]:
+        used_gen_feats = ["syst_Vital", "RASS_Vital", "diast_Vital", "PCO2_BGA", "Lac_BGA", "HF_Vital_std"]
+        keep_cols = basics + used_gen_feats
+        df = df[keep_cols]
+        
+        
+    #print(df.shape)
     dm = SeqDataModule(df,
                         target_name=cfg["target_name"],
                         random_starts=cfg["random_starts"], 
@@ -64,6 +133,7 @@ def create_dm(df, cfg):
                         randomly_mask_aug=cfg["randomly_mask_aug"],
                         agg_meds=cfg["agg_meds"],
                         norm_targets=cfg["norm_targets"],
+                        add_diagnosis_features=cfg["add_diagnosis_features"],
                         )
     dm.setup()
     return dm
@@ -119,6 +189,7 @@ def create_model(model_type, data_module, cfg):
                            "base":  {"hidden_size": 256,  "rnn_layers": 2},
                            "large": {"hidden_size": 512,  "rnn_layers": 2},
                            "xl":    {"hidden_size": 1024, "rnn_layers": 2},
+                           "xxl":    {"hidden_size": 2048, "rnn_layers": 2},
                           }
         if model_type == "transformer":
             assignments = transformer_assignments
@@ -137,7 +208,7 @@ def create_model(model_type, data_module, cfg):
                     "use_nan_embed_transformer",
                     "nan_embed_transformer_n_layers", 
                     "nan_embed_transformer_n_heads",
-                    "dropout"]
+                    "dropout", "low_mem_mode"]
     # get pos frac for weighting positive targets more
     targets = torch.cat(data_module.train_ds.targets)
     pos_frac = targets[~torch.isnan(targets)].mean()
@@ -233,6 +304,7 @@ def create_trainer(cfg, verbose=True, log=True):
                         enable_checkpointing=False,
                         callbacks=callbacks,
                         precision=16,
+                        #precision="bf16",  # not supported on Titan V / Volta architectures, only from Ampere
                         max_steps=cfg["max_steps"],
                         gradient_clip_val=cfg["grad_clip_val"],
                         max_epochs=cfg["max_epochs"],
@@ -367,9 +439,10 @@ def train_classical(model_type, data_module, cfg, verbose=True):
                              colsample_bytree=cfg["colsample_bytree"],
                              tree_method=cfg["tree_method"],)
     elif model_type == "linear":
-        from sklearn.linear_model import ElasticNet, LogisticRegression
+        from sklearn.linear_model import LogisticRegression
         if data_module.regression:
-             clf = ElasticNet(alpha=cfg["alpha"], 
+            from cuml import ElasticNet
+            clf = ElasticNet(alpha=cfg["alpha"], 
                               l1_ratio=cfg["l1_ratio"])
         else:        
             clf = LogisticRegression(penalty="elasticnet", 
@@ -387,9 +460,10 @@ def apply_cfg_to_dm(dm, cfg):
     dm.randomly_mask_aug = cfg["randomly_mask_aug"]
     dm.block_size = cfg["block_size"]
     dm.train_noise_std = cfg["train_noise_std"]
-    if dm.flat_block_size != cfg["flat_block_size"]:
-        dm.flat_block_size = cfg["flat_block_size"]
-        dm.make_flat_arrays()
+    # set block size in dm. Re-initialize in case the block size changed
+    dm.set_block_size(cfg["block_size"], cfg["flat_block_size"])
+    if cfg["fill_type"] == "none":
+        cfg["use_nan_embed"] = True
             
 
 def train_model(model_type, data_modules, cfg, verbose=True, log=True):
