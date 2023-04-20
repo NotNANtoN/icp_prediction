@@ -1,5 +1,5 @@
 # Most important settings:
-model_type: "mlp"
+model_type: "rnn"
 target_name: "ICP_Vital"   # ICP_Vital" , long_icp_hypertension_2, 
 db_name: "UKE"  # "UKE", "MIMIC"
 minutes: 60
